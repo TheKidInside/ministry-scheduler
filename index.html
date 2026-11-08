@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Ministry Scheduler</title>
   <meta name="description" content="Schedule ministers, worship, tech and preachers, and plan sermon series by month.">
   <meta name="theme-color" content="#121729">
@@ -15,6 +15,9 @@
   <script>
     // Apply the saved theme before first paint so dark mode never flashes light.
     try { const t = localStorage.getItem('ministry-scheduler:theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+    // iOS Safari ignores user-scalable=no, so block pinch zoom by hand.
+    document.addEventListener('gesturestart', e => e.preventDefault());
+    document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
   </script>
 </head>
 <body>

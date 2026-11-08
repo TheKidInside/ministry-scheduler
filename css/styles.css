@@ -62,6 +62,9 @@
 }
 
 * { box-sizing: border-box; }
+/* Phone lock (same as Chess Coach): no double-tap zoom, no sideways drag, no overscroll bounce
+   or swipe-back. Pinch zoom is blocked by the viewport tag and a script in <head>. */
+html, body { overflow-x: clip; overscroll-behavior: none; touch-action: manipulation; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
@@ -403,7 +406,13 @@ dialog::backdrop { background: rgb(9 12 23 / .5); backdrop-filter: blur(2px); }
 
 /* ---------- phones ---------- */
 @media (max-width: 760px) {
-  body { display: block; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+  /* Phone shell: the page never scrolls or bounces; the header stays put and only .main scrolls,
+     so a swipe can't drag the screen out of view or trigger swipe-back. */
+  body { display: flex; flex-direction: column; position: fixed; inset: 0; overflow: hidden; }
+  .rail { flex: none; }
+  .main { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: clip; overscroll-behavior: none;
+          touch-action: pan-y; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+  input, select, textarea { font-size: 16px; }
   .rail { position: static; height: auto; flex-direction: row; align-items: center; padding: 14px 16px; gap: 12px; border-right: 0; border-bottom: 1px solid rgb(207 174 98 / .18); }
   .brand-text { display: block; }
   .mark { width: 34px; height: 34px; }

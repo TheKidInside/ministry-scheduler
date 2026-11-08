@@ -778,7 +778,7 @@ async function handleAction(el) {
 function wire() {
   document.addEventListener('click', e => {
     const tab = e.target.closest('[data-tab]');
-    if (tab) { e.preventDefault(); view.tab = tab.dataset.tab; render(); window.scrollTo(0, 0); return; }
+    if (tab) { e.preventDefault(); view.tab = tab.dataset.tab; render(); window.scrollTo(0, 0); $('.main').scrollTo(0, 0); return; }
     const el = e.target.closest('[data-action]');
     if (!el || el.tagName === 'SELECT' || dialog().contains(el)) return;
     handleAction(el);
