@@ -8,13 +8,14 @@ import { sampleState } from './sample.js';
 const localStore = createStore();
 let store = localStore;          // swapped for a FirebaseStore when you sign in to a church
 let unsubscribe = () => {};
-const TABS = ['schedule', 'preaching', 'ministers', 'series', 'settings'];
-const MONTH_TABS = new Set(['schedule', 'preaching', 'ministers']);
+const TABS = ['schedule', 'preaching', 'tasks', 'ministers', 'series', 'settings'];
+const MONTH_TABS = new Set(['schedule', 'preaching', 'tasks']);
 const THEME_KEY = 'ministry-scheduler:theme';
+const phoneWidth = matchMedia('(max-width: 760px)');
 
 let state = M.emptyState();
 const now = new Date();
-const view = { tab: 'schedule', y: now.getFullYear(), m: now.getMonth() + 1, focus: '' };
+const view = { tab: 'schedule', y: now.getFullYear(), m: now.getMonth() + 1, focus: '', announce: false, day: '', search: '', roleFilter: '' };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -53,17 +54,18 @@ async function replaceAll(next) {
   state = isCloud() ? M.normalizeState(structuredClone(next)) : await store.load();
 }
 
-// Write back only the services a bulk change actually touched.
-async function putChangedServices(before, after) {
-  const old = new Map(before.map(s => [s.id, s]));
-  for (const s of after) if (old.get(s.id) !== s) await putDoc('services', s);
+// Write back only the docs a bulk change actually touched.
+async function putChanged(collection, before, after) {
+  const old = new Map(before.map(d => [d.id, d]));
+  for (const d of after) if (old.get(d.id) !== d) await putDoc(collection, d);
 }
 
 // ---------- routing ----------
 
 function readHash() {
-  const [, tab, month] = location.hash.split('/');
+  const [, tab, month, mode] = location.hash.split('/');
   if (TABS.includes(tab)) view.tab = tab;
+  view.announce = mode === 'announce';
   if (/^\d{4}-\d{2}$/.test(month || '')) {
     const [y, m] = month.split('-').map(Number);
     if (m >= 1 && m <= 12) { view.y = y; view.m = m; }
@@ -71,38 +73,109 @@ function readHash() {
 }
 
 function writeHash() {
-  const next = `#/${view.tab}/${M.toISO(view.y, view.m, 1).slice(0, 7)}`;
+  const next = `#/${view.tab}/${M.toISO(view.y, view.m, 1).slice(0, 7)}${view.tab === 'schedule' && view.announce ? '/announce' : ''}`;
   if (location.hash !== next) history.replaceState(null, '', next);
 }
 
 // ---------- render ----------
 
-const TAB_TITLES = {
-  schedule: 'Schedule', preaching: 'Preaching', ministers: 'Ministers', series: 'Sermon series', settings: 'Settings',
+const TAB_NAMES = {
+  schedule: 'Schedule', preaching: 'Preaching', tasks: 'Tasks', ministers: 'Ministers', series: 'Series', settings: 'Settings',
+};
+
+const icon = path => `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
+const ICONS = {
+  copy: icon('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
+  print: icon('<path d="M6 9V3h12v6M6 18H4a1 1 0 0 1-1-1v-6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a1 1 0 0 1-1 1h-2"/><rect x="6" y="14" width="12" height="7"/>'),
+  spark: icon('<path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>'),
+  plus: icon('<path d="M12 5v14M5 12h14"/>'),
+  pencil: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/>'),
+  warn: icon('<path d="M12 3 2 20h20z"/><path d="M12 10v5M12 17.5v.5"/>'),
+  search: icon('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
+  close: icon('<path d="M6 6l12 12M18 6L6 18"/>'),
+  grip: icon('<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>'),
+  back: icon('<path d="M15 6l-6 6 6 6"/>'),
+};
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function pageTitle() {
+  if (MONTH_TABS.has(view.tab)) return `${M.MONTHS[view.m - 1]} ${view.y}`;
+  if (view.tab === 'ministers') return state.people.length ? `${state.people.length} ${state.people.length === 1 ? 'person' : 'people'} serving` : 'Ministers';
+  return view.tab === 'series' ? 'Sermon series' : 'Church settings';
+}
+
+// The buttons at the top right of a page. On a phone these shrink to icons in the navy header.
+function pageActions() {
+  const act = (action, ic, label, cls = '') => `<button class="btn act ${cls}" data-action="${action}" aria-label="${label}">${ICONS[ic]}<span>${label}</span></button>`;
+  const hasServices = M.servicesInMonth(state.services, view.y, view.m).length > 0;
+  switch (view.tab) {
+    case 'schedule': return hasServices
+      ? act('copy-roster', 'copy', 'Copy as text') + act('print', 'print', 'Print', 'hide-phone') + act('autofill-month', 'spark', 'Auto-fill open slots', 'primary') : '';
+    case 'preaching': return hasServices ? act('print', 'print', 'Print preaching plan', 'primary') : '';
+    case 'ministers': return act('new-person', 'plus', 'Add minister', 'primary gold');
+    case 'series': return act('new-series', 'plus', 'New series', 'primary gold');
+    default: return '';
+  }
+}
+
+// A phone keeps what you navigate with in the navy header, which stays put as the page scrolls.
+const phoneHeads = {
+  schedule() {
+    if (view.announce) return '';
+    const list = M.servicesInMonth(state.services, view.y, view.m);
+    if (!list.length) return '';
+    const picked = pickedService(list);
+    return `<div class="day-pills" style="--n:${Math.min(list.length, 6)}">${list.map(svc => {
+      const s = M.serviceSummary(state, svc);
+      const d = dayParts(svc.date);
+      return `<button class="day-pill" data-action="pick-day" data-id="${esc(svc.id)}" aria-pressed="${svc.id === picked.id}" aria-label="${esc(M.shortDate(svc.date))}">
+        <span class="dow">${esc(d.dow)}</span><span class="num">${d.num}</span><span class="dot${s.open || s.clashes.length ? ' on' : ''}"></span></button>`;
+    }).join('')}</div>`;
+  },
+  preaching() {
+    const list = M.servicesInMonth(state.services, view.y, view.m);
+    const runs = seriesRuns(list).filter(run => seriesById(run.sid));
+    return runs.length ? `<div class="arc-compact">${runs.map(run => {
+      const series = seriesById(run.sid);
+      const a = M.seriesPart(state.services, run.items[0].svc).n;
+      const b = M.seriesPart(state.services, run.items[run.items.length - 1].svc).n;
+      return `<span class="bar" style="--n:${run.items.length};--series:${esc(series.color)}">${esc(series.name)} · ${a === b ? a : `${a}–${b}`}</span>`;
+    }).join('')}</div>` : '';
+  },
+  ministers: () => (state.people.length ? ministerFilters() : ''),
 };
 
 function render() {
   writeHash();
+  if (!state.roles.some(r => r.id === view.roleFilter)) view.roleFilter = '';
   document.title = `${state.settings.churchName} · Ministry Scheduler`;
   $('#church-name').textContent = state.settings.churchName;
   const monthTab = MONTH_TABS.has(view.tab);
-  $('#page-eyebrow').textContent = monthTab ? TAB_TITLES[view.tab] : state.settings.churchName;
-  $('#month-label').innerHTML = monthTab
-    ? `${esc(M.MONTHS[view.m - 1])} <span class="year">${view.y}</span>`
-    : esc(TAB_TITLES[view.tab]);
+  const head = $('.page-head');
+  head.dataset.page = view.tab;
+  head.classList.toggle('off-month', monthTab && (view.y !== now.getFullYear() || view.m !== now.getMonth() + 1));
+  $('#page-eyebrow').textContent = TAB_NAMES[view.tab];
+  $('#month-label').textContent = pageTitle();
   $('#month-nav').hidden = !monthTab;
+  const sub = $('#page-sub');
+  sub.hidden = view.tab !== 'settings';
+  sub.textContent = isCloud() ? 'Changes save automatically and are shared with your church.' : 'Changes save automatically in this browser.';
+  $('#page-actions').innerHTML = pageActions();
+  $('#head-extra').innerHTML = phoneWidth.matches ? phoneHeads[view.tab]?.() || '' : '';
   for (const a of $$('[data-tab]')) a.setAttribute('aria-current', a.dataset.tab === view.tab ? 'page' : 'false');
-  const views = { schedule: renderSchedule, preaching: renderPreaching, ministers: renderMinisters, series: renderSeries, settings: renderSettings };
+  const views = { schedule: renderSchedule, preaching: renderPreaching, tasks: renderTasks, ministers: renderMinisters, series: renderSeries, settings: renderSettings };
   const el = $('#view');
   el.innerHTML = views[view.tab]();
   if (el.dataset.view !== view.tab) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); }
   el.dataset.view = view.tab;
+  if (view.tab === 'ministers') applyMinisterFilter();
   renderAccountButton();
   renderMineButton();
 }
 
 function emptyState(title, body, action = '') {
-  return `<div class="empty"><span class="ornament" aria-hidden="true"></span><h2>${esc(title)}</h2><p>${esc(body)}</p>${action}</div>`;
+  return `<div class="empty"><h2>${esc(title)}</h2><p>${esc(body)}</p>${action}</div>`;
 }
 
 // Two-letter monogram: "Ana R." -> "AR", "Pastor Jon" -> "PJ".
@@ -111,7 +184,12 @@ function initials(name) {
   return ((parts[0]?.[0] || '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase() || '?';
 }
 
-const personTag = (name, cls = 'chip') => `<span class="${cls}"><span class="mono" aria-hidden="true">${esc(initials(name))}</span>${esc(name)}</span>`;
+// A minister's own photo, else the one on the account they're linked to.
+const photoOf = person => person?.photo || cloudState.info?.memberPhotos?.[person?.userId] || '';
+const personPhoto = id => photoOf(state.people.find(p => p.id === id));
+const avatar = (name, photo = '') => (photo
+  ? `<img class="mono" src="${esc(photo)}" alt="" aria-hidden="true">`
+  : `<span class="mono" aria-hidden="true">${esc(initials(name))}</span>`);
 
 const dayParts = iso => ({
   num: M.parseISO(iso).d,
@@ -119,70 +197,151 @@ const dayParts = iso => ({
   mon: M.formatDate(iso, { month: 'short' }),
 });
 
-// Schedule: one row per service, one column per role.
+const dateRange = (a, b) => {
+  const start = { day: 'numeric', month: 'short' };
+  if (a.slice(0, 4) !== b.slice(0, 4)) start.year = 'numeric';
+  return `${M.formatDate(a, start)} – ${M.formatDate(b, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+};
+
+function highlightField() {
+  const options = state.people.slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(p => `<option value="${esc(p.id)}" ${p.id === view.focus ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+  return `<label class="inline-field">Highlight
+        <select data-action="focus" aria-label="Highlight a minister"><option value="">Nobody</option>${options}</select>
+      </label>`;
+}
+
+const assignButton = (svc, roleId, slot, label = 'Assign') => `<button class="assign" data-action="assign" data-id="${esc(svc.id)}" data-role="${esc(roleId)}" data-slot="${slot}">${ICONS.plus}${esc(label)}</button>`;
+
+const pickedService = list => list.find(s => s.id === view.day) || list.find(s => s.date >= M.todayISO()) || list[0];
+
+// Schedule: one row per service, one column per role. A phone shows one service at a time.
 function renderSchedule() {
+  const modeBtn = (on, value, label) => `<button class="seg${on ? ' on' : ''}" data-action="schedule-mode" data-value="${value}" aria-pressed="${on}">${label}</button>`;
+  const modes = `<div class="view-mode"><div class="segmented" role="group" aria-label="Schedule view">${modeBtn(!view.announce, 'manage', 'Manage')}${modeBtn(view.announce, 'announce', 'Announcement')}</div></div>`;
+  if (view.announce) return `<div class="toolbar">${modes}</div>${renderAnnouncement()}`;
   const list = M.servicesInMonth(state.services, view.y, view.m);
   const day = M.WEEKDAYS[Number(state.settings.defaultDay) || 0];
-  const focusOptions = state.people.slice().sort((a, b) => a.name.localeCompare(b.name))
-    .map(p => `<option value="${esc(p.id)}" ${p.id === view.focus ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
-  const toolbar = `
-    <div class="toolbar">
-      <div class="toolbar-group">
-        <button class="btn primary" data-action="fill-month">Add every ${esc(day)}</button>
-        <button class="btn" data-action="new-service">Add a service</button>
-        ${list.length ? '<button class="btn ghost" data-action="copy-roster">Copy roster</button>' : ''}
-      </div>
-      <label class="inline-field">Highlight
-        <select data-action="focus" aria-label="Highlight a minister"><option value="">Nobody</option>${focusOptions}</select>
-      </label>
-    </div>`;
+  const addButtons = primary => `<button class="btn${primary ? ' primary' : ''}" data-action="fill-month">Add every ${esc(day)}</button>
+        <button class="btn" data-action="new-service">Add a service</button>`;
   if (!list.length) {
-    return toolbar + emptyState('No services this month',
-      `Add every ${day} in one click, or add a single service for a special date.`);
+    return `<div class="toolbar">${modes}</div>` + emptyState('No services this month',
+      `Add every ${day} in one click, or add a single service for a special date.`, `<div class="row-actions">${addButtons(true)}</div>`);
   }
+  if (phoneWidth.matches) return renderDay(pickedService(list), modes, addButtons(false));
+
+  const summary = M.monthSummary(state, view.y, view.m);
+  const stat = (label, value, tone = '', of = '') => `<div class="stat"><span class="stat-label">${label}</span>
+    <span class="stat-value ${value ? tone : ''}">${value}${of ? `<small> / ${of}</small>` : ''}</span></div>`;
+  const stats = `<section class="stats" aria-label="This month at a glance">
+    ${stat('Services this month', summary.services)}${stat('Roles filled', summary.filled, '', summary.total)}${stat('Open slots', summary.open, 'amber')}${stat('Clashes', summary.clashes.length, 'red')}
+  </section>`;
+  const alert = summary.clashes.length ? `<section class="alert">${ICONS.warn}<div>
+      <strong>${summary.clashes.length === 1 ? '1 clash needs' : `${summary.clashes.length} clashes need`} sorting out</strong>
+      <ul>${summary.clashes.map(({ service, clash }) => `<li><button class="alert-line" data-action="edit-service" data-id="${esc(service.id)}">${esc(M.clashSentence(state, service, clash))}</button></li>`).join('')}</ul>
+    </div></section>` : '';
+  const toolbar = `<div class="toolbar">${modes}
+      <div class="toolbar-group">
+        ${addButtons(false)}
+        ${highlightField()}
+      </div>
+    </div>`;
+
+  const today = M.todayISO();
+  const thisWeekId = list.find(s => s.date >= today && s.date <= M.addDays(today, 6))?.id;
   const head = state.roles.map(r => `<th scope="col">${esc(r.name)}</th>`).join('');
   const rows = list.map(svc => {
-    const conflicts = M.serviceConflicts(state, svc);
-    const bad = new Set(conflicts.map(c => `${c.roleId}:${c.personId}`));
+    const clashes = M.serviceClashes(state, svc);
     const cells = state.roles.map(role => {
       const ids = M.assigned(svc, role.id).filter(Boolean);
       const open = Math.max(0, (role.slots || 1) - ids.length);
-      const chips = ids.map(id => {
-        const cls = ['chip'];
-        if (id === view.focus) cls.push('focus');
-        if (bad.has(`${role.id}:${id}`)) cls.push('conflict');
-        return personTag(personName(id), cls.join(' '));
+      const names = ids.map(id => {
+        const clash = clashes.find(c => c.roleId === role.id && c.personId === id);
+        if (clash) return `<span class="chip conflict${id === view.focus ? ' focus' : ''}">${esc(personName(id))}<small>${esc(M.clashNote(state, svc, clash))}</small></span>`;
+        return `<span class="chip${id === view.focus ? ' focus' : ''}">${esc(personName(id))}</span>`;
       }).join('');
-      const need = open ? `<span class="need">${ids.length ? `${open} open` : 'Open'}</span>` : '';
-      return `<td data-label="${esc(role.name)}"><div class="cell">${chips}${need}</div></td>`;
+      return `<td data-label="${esc(role.name)}"><div class="cell">${names}${open ? assignButton(svc, role.id, ids.length, open > 1 ? `Assign ${open}` : 'Assign') : ''}</div></td>`;
     }).join('');
     const series = seriesById(svc.sermon?.seriesId);
-    const d = dayParts(svc.date);
-    const flag = conflicts.length
-      ? `<span class="flag" title="${esc(conflicts.map(c => M.describeConflict(state, c)).join('\n'))}">${conflicts.length} to check</span>` : '';
-    return `<tr data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0">
+    const passage = M.shortScripture(series?.name, svc.sermon?.scripture);
+    const usual = svc.time === state.settings.defaultTime && svc.name === state.settings.serviceName;
+    return `<tr class="${svc.id === thisWeekId ? 'this-week' : ''}" data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0">
       <th scope="row" class="when"><div class="when-inner">
-        <span class="date-block"><span class="day-num">${d.num}</span><span class="day-dow">${esc(d.dow)}</span></span>
-        <span class="when-meta">
-          <span class="meta">${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>
-          ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
-          ${svc.setlist?.length ? `<span class="songs-tag" title="${esc(svc.setlist.map(M.songLabel).join('\n'))}">${svc.setlist.length} song${svc.setlist.length > 1 ? 's' : ''}</span>` : ''}
-          ${flag}
-        </span>
+        <span class="when-date">${esc(M.shortDate(svc.date))}${svc.id === thisWeekId ? '<span class="week-pill">This week</span>' : ''}</span>
+        ${series || passage ? `<span class="when-meta"><span class="series-tag" style="--series:${esc(series?.color || 'var(--line-strong)')}">${esc([series?.name, passage].filter(Boolean).join(' · '))}</span></span>` : ''}
+        ${!usual || svc.setlist?.length ? `<span class="when-meta">${usual ? '' : `<span>${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>`}
+          ${svc.setlist?.length ? `<span class="songs-tag" title="${esc(svc.setlist.map(M.songLabel).join('\n'))}">${plural(svc.setlist.length, 'song')}</span>` : ''}</span>` : ''}
       </div></th>${cells}</tr>`;
   }).join('');
-  return toolbar + `<div class="table-wrap"><table class="matrix"><thead><tr><th scope="col">Service</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="hint">Select a service to assign people, write the sermon, or auto-fill open places.</p>`;
+  return `${stats}${alert}${toolbar}<div class="table-wrap"><table class="matrix"><thead><tr><th scope="col">Service</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="legend"><span><i class="l-open"></i>Open slot</span><span><i class="l-clash"></i>Clash: rostered twice, away, or not set up for the role</span></div>`;
 }
 
-// Preaching: the month as an arc of series. Each series is a ribbon spanning its Sundays;
-// each sermon is a folio beneath it. On phones the same DOM order reads top to bottom.
-function renderPreaching() {
-  const list = M.servicesInMonth(state.services, view.y, view.m);
-  if (!list.length) return emptyState('No services this month', 'Add services on the Schedule tab, then plan the sermons here.');
-  const preacherOf = svc => M.assigned(svc, M.PREACHER_ROLE).filter(Boolean).map(personName);
+// One service on a phone, grouped the way the team thinks of it.
+function renderDay(svc, modes, addButtons) {
+  const { open, clashes } = M.serviceSummary(state, svc);
+  const parts = [clashes.length && `${clashes.length} clash${clashes.length === 1 ? '' : 'es'}`, open && `${open} open`].filter(Boolean);
+  const series = seriesById(svc.sermon?.seriesId);
+  const preachers = M.assigned(svc, M.PREACHER_ROLE).filter(Boolean).map(personName).join(', ') || 'Not yet assigned';
+  const title = svc.sermon?.title || svc.sermon?.scripture || series?.name || 'Sermon to come';
+  const passage = svc.sermon?.title ? svc.sermon?.scripture : '';
+  const groups = M.roleGroups(state.roles).map(group => `<section class="group">
+      <h2 class="group-label">${esc(group.name)}</h2>
+      <div class="group-card">${group.roles.map(role => {
+        const ids = M.assigned(svc, role.id).filter(Boolean);
+        return Array.from({ length: Math.max(role.slots || 1, ids.length) }, (_, i) => {
+          const id = ids[i];
+          const clash = id && clashes.find(c => c.roleId === role.id && c.personId === id);
+          const who = id ? `<span class="slot-who"><span class="slot-name">${esc(personName(id))}${clash ? `<small>${esc(M.clashNote(state, svc, clash))}</small>` : ''}</span>${avatar(personName(id), personPhoto(id))}</span>`
+            : `<span class="assign">${ICONS.plus}Assign</span>`;
+          return `<button class="slot${clash ? ' conflict' : ''}" data-action="assign" data-id="${esc(svc.id)}" data-role="${esc(role.id)}" data-slot="${id ? i : ids.length}" aria-label="${esc(role.name)}: ${esc(id ? personName(id) : 'open')}">
+            <span class="slot-role">${i ? '' : esc(role.name)}</span>${who}</button>`;
+        }).join('');
+      }).join('')}</div>
+    </section>`).join('');
+  const songs = svc.setlist?.length
+    ? svc.setlist.map((song, i) => `<div class="song"><span class="song-n">${i + 1}</span><span class="song-title">${esc(song.title)}</span>${song.key ? `<span class="song-key">${esc(song.key)}</span>` : ''}</div>`).join('')
+    : `<div class="no-songs"><span>No songs added yet</span><button class="btn small" data-action="edit-service" data-id="${esc(svc.id)}">Add songs</button></div>`;
+  const when = M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '');
+  return `<div class="toolbar">${modes}</div>
+    <div class="day-view">
+      <button class="day-card" data-action="edit-service" data-id="${esc(svc.id)}" aria-label="Edit ${esc(when)}">
+        <span class="day-top"><span>${esc(when)}</span><span class="status${clashes.length ? ' bad' : open ? ' warn' : ''}">${esc(parts.join(' · ') || 'Fully rostered')}</span></span>
+        <span><span class="day-title">${esc(title)}</span>
+        <span class="day-sub">${passage ? `${esc(passage)} · ` : ''}Preacher: ${esc(preachers)}</span></span>
+      </button>
+      ${groups}
+      <section class="group"><h2 class="group-label">Setlist</h2><div class="group-card">${songs}</div></section>
+      <div class="day-foot">${addButtons}</div>
+    </div>`;
+}
 
-  // consecutive runs of the same series
+// Announcement: the month as one self-contained card to screenshot into group chats.
+// Dates run across and roles down, so more roles make it taller, never too wide for a phone.
+function renderAnnouncement() {
+  const blocks = M.announcementBlocks(state, view.y, view.m, phoneWidth.matches ? 4 : 5); // 5 dates are too tight to read on a phone
+  if (!blocks.length) return emptyState('No services this month', 'Add services under Manage, then share the month from here.');
+  const { churchName, defaultTime, serviceName } = state.settings;
+  const dateHead = svc => {
+    const d = dayParts(svc.date);
+    const special = [svc.time !== defaultTime && svc.time, svc.name !== serviceName && svc.name].filter(Boolean).join(' · ');
+    return `<th scope="col"><span class="ann-dow">${esc(d.dow)}</span><span class="ann-date">${d.num} ${esc(d.mon)}</span>${special ? `<span class="ann-special">${esc(special)}</span>` : ''}</th>`;
+  };
+  const namesCell = names => `<td>${names.length ? names.map(n => `<span class="ann-name">${esc(n)}</span>`).join('') : '<span class="ann-tba">TBA</span>'}</td>`;
+  const tables = blocks.map(b => `<table class="announce-table">
+    <thead><tr><th scope="col">Role</th>${b.services.map(dateHead).join('')}</tr></thead>
+    <tbody>${b.rows.map(r => `<tr><th scope="row">${esc(r.role.name)}</th>${r.cells.map(namesCell).join('')}</tr>`).join('')}</tbody>
+  </table>`).join('');
+  return `<section class="announce" aria-label="Roster to share">
+      <header class="announce-head"><span class="announce-church">${esc(churchName)}</span>
+        <h2>${esc(M.MONTHS[view.m - 1])} <span class="year">${view.y}</span> roster</h2></header>
+      ${tables}
+    </section>
+    <p class="hint">Screenshot this card to send it to your group chats.</p>`;
+}
+
+// Consecutive services in the same series, each with its place in the month.
+function seriesRuns(list) {
   const runs = [];
   list.forEach((svc, i) => {
     const sid = svc.sermon?.seriesId || '';
@@ -190,149 +349,233 @@ function renderPreaching() {
     if (last && last.sid === sid) last.items.push({ svc, i });
     else runs.push({ sid, items: [{ svc, i }] });
   });
+  return runs;
+}
 
-  const folio = ({ svc, i }) => {
+// Preaching: the month's series as one ribbon, then a card for each sermon.
+function renderPreaching() {
+  const list = M.servicesInMonth(state.services, view.y, view.m);
+  if (!list.length) return emptyState('No services this month', 'Add services on the Schedule tab, then plan the sermons here.');
+  const today = M.todayISO();
+
+  const folio = svc => {
     const series = seriesById(svc.sermon?.seriesId);
     const part = M.seriesPart(state.services, svc);
-    const d = dayParts(svc.date);
-    const preachers = preacherOf(svc);
-    return `<button class="folio${svc.date === M.todayISO() ? ' today' : ''}" data-action="edit-service" data-id="${esc(svc.id)}"
-      style="grid-column:${i + 1};grid-row:2;--series:${esc(series?.color || 'var(--muted)')}">
-      <span class="folio-date"><span class="folio-num">${d.num}</span><span class="folio-dow">${esc(d.dow)} · ${esc(d.mon)}</span></span>
-      <span class="folio-part">${part ? `Part ${part.n} of ${part.of}` : 'Stand-alone'}</span>
-      <span class="folio-title">${esc(svc.sermon?.title) || '<em>Title to come</em>'}</span>
-      <span class="folio-scripture">${esc(svc.sermon?.scripture) || '<em>Scripture to come</em>'}</span>
-      <span class="folio-preacher">${preachers.length ? preachers.map(n => personTag(n, 'chip plain')).join('') : '<span class="need">Preacher open</span>'}</span>
-    </button>`;
+    const preachers = M.assigned(svc, M.PREACHER_ROLE).filter(Boolean);
+    const who = preachers.map(id => `<span class="preacher">${avatar(personName(id), personPhoto(id))}${esc(personName(id))}</span>`).join('');
+    return `<article class="folio${svc.date === today ? ' today' : ''}" data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0" style="--series:${esc(series?.color || 'var(--muted)')}">
+      <header class="folio-top"><span class="folio-date">${esc(M.shortDate(svc.date))}</span>
+        <span class="folio-part">${series ? `${esc(series.name)} · Part ${part.n}` : 'Stand-alone'}</span></header>
+      <h3 class="folio-title">${esc(svc.sermon?.title) || '<em>Title to come</em>'}</h3>
+      <p class="folio-scripture">${esc(svc.sermon?.scripture) || '<em>Scripture to come</em>'}</p>
+      <footer class="folio-foot"><span class="folio-people">${who || assignButton(svc, M.PREACHER_ROLE, 0, 'Assign preacher')}</span>
+        <button class="icon-btn" data-action="edit-service" data-id="${esc(svc.id)}" aria-label="Edit ${esc(M.shortDate(svc.date))}">${ICONS.pencil}</button></footer>
+    </article>`;
   };
 
-  const arc = runs.map(run => {
+  const ribbons = seriesRuns(list).map(run => {
     const series = seriesById(run.sid);
     const first = run.items[0];
-    const lastItem = run.items[run.items.length - 1];
-    let label = '<span class="ribbon-name">No series</span>';
-    let meta = `${run.items.length} sermon${run.items.length > 1 ? 's' : ''}`;
-    if (series) {
-      const a = M.seriesPart(state.services, first.svc);
-      const b = M.seriesPart(state.services, lastItem.svc);
-      label = `<span class="ribbon-name">${esc(series.name)}</span>`;
-      meta = a.n === b.n ? `Part ${a.n} of ${a.of}` : `Parts ${a.n}–${b.n} of ${b.of}`;
-    }
-    const tag = series ? 'button' : 'div';
-    const attrs = series ? ` data-action="edit-series" data-id="${esc(series.id)}"` : '';
-    return `<${tag} class="ribbon${series ? '' : ' none'}"${attrs} style="grid-column:${first.i + 1} / span ${run.items.length};grid-row:1;--series:${esc(series?.color || 'var(--muted)')}">
-        ${label}<span class="ribbon-meta">${esc(meta)}</span></${tag}>${run.items.map(folio).join('')}`;
+    const span = `grid-column:${first.i + 1} / span ${run.items.length}`;
+    if (!series) return `<div class="ribbon none" style="${span}"><span class="ribbon-name">No series</span><span class="ribbon-meta">${plural(run.items.length, 'sermon')}</span></div>`;
+    const a = M.seriesPart(state.services, first.svc);
+    const b = M.seriesPart(state.services, run.items[run.items.length - 1].svc);
+    return `<button class="ribbon" data-action="edit-series" data-id="${esc(series.id)}" style="${span};--series:${esc(series.color)}">
+      <span class="ribbon-name">${esc(series.name)}</span><span class="ribbon-meta">${a.n === b.n ? `Part ${a.n} of ${a.of}` : `Parts ${a.n}–${b.n} of ${b.of}`}</span></button>`;
   }).join('');
+  const dates = list.map(s => `<span>${esc(M.formatDate(s.date, { day: 'numeric', month: 'short' }))}</span>`).join('');
+  const arc = phoneWidth.matches ? '' : `<section class="arc" style="--n:${list.length}" aria-label="Sermons this month by series">
+      <h2 class="panel-label">Series this month</h2>
+      <div class="arc-bars">${ribbons}</div>
+      <div class="arc-dates">${dates}</div>
+    </section>`;
+  return `${arc}<section class="folio-grid" aria-label="Sermons this month">${list.map(folio).join('')}</section>`;
+}
 
-  const rows = list.map(svc => {
-    const series = seriesById(svc.sermon?.seriesId);
-    const part = M.seriesPart(state.services, svc);
-    return `<tr data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0" style="--series:${esc(series?.color || 'var(--line-strong)')}">
-      <td data-label="Date" class="nowrap">${esc(M.formatDate(svc.date))}</td>
-      <td data-label="Series"><span class="series-tag">${series ? esc(series.name) : 'None'}${part ? ` <span class="muted">${part.n}/${part.of}</span>` : ''}</span></td>
-      <td data-label="Title" class="plan-title">${esc(svc.sermon?.title) || '<span class="muted">To come</span>'}</td>
-      <td data-label="Scripture" class="plan-scripture">${esc(svc.sermon?.scripture) || '<span class="muted">—</span>'}</td>
-      <td data-label="Preacher">${esc(preacherOf(svc).join(', ')) || '<span class="need">Open</span>'}</td>
-    </tr>`;
+// Tasks: a card for each week of the month, each week running up to the usual service day.
+function renderTasks() {
+  const day = state.settings.defaultDay;
+  const today = M.todayISO();
+  const short = iso => M.formatDate(iso, { day: 'numeric', month: 'short' });
+  const weeks = M.weeksInMonth(view.y, view.m, day).map(w => ({ ...w, tasks: M.tasksInWeek(state.tasks, w.end, day) }));
+  const all = weeks.flatMap(w => w.tasks);
+  const unassigned = all.filter(t => !t.done && !t.assignees.length).length;
+  const summary = all.length
+    ? `${all.filter(t => t.done).length} of ${all.length} done${unassigned ? ` · ${unassigned} unassigned` : ''}`
+    : 'No tasks yet this month';
+  const row = t => {
+    const who = t.assignees.map(id => `<span class="chip${id === view.focus ? ' focus' : ''}">${esc(personName(id))}</span>`).join('');
+    return `<li class="task${t.done ? ' done' : ''}">
+      <label class="task-check"><input type="checkbox" data-task-done="${esc(t.id)}" ${t.done ? 'checked' : ''} aria-label="${esc(t.title)}: done"></label>
+      <button class="task-main" data-action="edit-task" data-id="${esc(t.id)}">
+        <span class="task-title">${esc(t.title)}</span>
+        ${t.notes ? `<span class="task-notes">${esc(t.notes)}</span>` : ''}
+        <span class="cell">${who || (t.done ? '' : '<span class="need">Unassigned</span>')}</span>
+      </button></li>`;
+  };
+  const cards = weeks.map(w => {
+    const d = dayParts(w.end);
+    const series = seriesById(state.services.find(s => s.date === w.end)?.sermon?.seriesId);
+    const current = w.start <= today && today <= w.end;
+    return `<section class="week${current ? ' current' : ''}" aria-label="Week ending ${esc(short(w.end))}">
+      <header class="week-head">
+        <span class="date-block"><span class="day-num">${d.num}</span><span class="day-dow">${esc(d.dow)}</span></span>
+        <span class="when-meta">
+          <span class="meta">${esc(short(w.start))} – ${esc(short(w.end))}${current ? ' <span class="week-pill">This week</span>' : ''}</span>
+          ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
+        </span>
+        ${w.tasks.length ? `<span class="week-count muted small">${w.tasks.filter(t => t.done).length} of ${w.tasks.length}</span>` : ''}
+        <button class="btn small week-add" data-action="new-task" data-week="${esc(w.end)}">Add a task</button>
+      </header>
+      ${w.tasks.length ? `<ul class="task-list">${w.tasks.map(row).join('')}</ul>` : '<p class="week-empty muted">Nothing planned yet.</p>'}
+    </section>`;
   }).join('');
+  return `<div class="toolbar"><span class="muted">${esc(summary)}</span>${phoneWidth.matches ? '' : highlightField()}</div>
+    <div class="week-grid">${cards}</div>
+    <p class="hint">Each week runs up to its ${esc(M.WEEKDAYS[Number(day) || 0])}. Select a task to change it or assign people.</p>`;
+}
 
-  return `<div class="arc-wrap"><section class="arc" aria-label="Sermons this month by series" style="--n:${list.length}">${arc}</section></div>
-    <div class="section-head"><h2 class="section-title">Preaching plan</h2><span class="muted">${list.length} sermon${list.length > 1 ? 's' : ''} in ${esc(M.MONTHS[view.m - 1])}</span></div>
-    <div class="table-wrap"><table class="plan"><thead><tr><th>Date</th><th>Series</th><th>Title</th><th>Scripture</th><th>Preacher</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+function ministerFilters() {
+  const options = state.roles.map(r => `<option value="${esc(r.id)}" ${r.id === view.roleFilter ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+  return `<div class="filters">
+    <label class="search-field"><span class="label-text">Search</span>
+      <span class="search-box">${ICONS.search}<input id="minister-search" type="search" value="${esc(view.search)}" placeholder="${phoneWidth.matches ? 'Search name or role' : 'Name'}" autocomplete="off"></span></label>
+    <label class="role-filter"><span class="label-text">Role</span>
+      <select id="minister-role"><option value="">${phoneWidth.matches ? 'All' : 'All roles'}</option>${options}</select></label>
+  </div>`;
+}
+
+// Filters by hiding rows, so typing in the search box never redraws it.
+function applyMinisterFilter() {
+  const q = view.search.trim().toLowerCase();
+  const rows = $$('.person');
+  let shown = 0;
+  for (const row of rows) {
+    const match = row.dataset.search.includes(q) && (!view.roleFilter || row.dataset.roles.split(' ').includes(view.roleFilter));
+    row.hidden = !match;
+    if (match) shown++;
+  }
+  const count = $('.list-count');
+  if (count) count.textContent = shown === rows.length ? `Showing all ${rows.length}, sorted by role` : `Showing ${shown} of ${rows.length}`;
+  const none = $('.no-match');
+  if (none) none.hidden = shown > 0;
 }
 
 function renderMinisters() {
-  const people = state.people.slice().sort((a, b) => a.name.localeCompare(b.name));
-  const toolbar = `<div class="toolbar"><button class="btn primary" data-action="new-person">Add a minister</button>
-    <span class="muted">${people.length} minister${people.length === 1 ? '' : 's'}</span></div>`;
-  if (!people.length) return toolbar + emptyState('No ministers yet', 'Add the people who serve, and the roles each one can do.');
+  const order = new Map(state.roles.map((r, i) => [r.id, i]));
+  const rank = p => Math.min(state.roles.length, ...p.roleIds.map(id => order.get(id) ?? state.roles.length));
+  const people = state.people.slice().sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+  if (!people.length) return emptyState('No ministers yet', 'Add the people who serve, and the roles each one can do.');
   const today = M.todayISO();
-  const cards = people.map(p => {
-    const load = M.monthLoad(state.services, p.id, view.y, view.m);
+  const { y, m } = M.parseISO(today);
+  const rows = people.map(p => {
+    const month = M.ministerMonth(state.services, p.id, y, m);
     const next = M.personSchedule(state, p.id, today)[0];
-    const away = (p.unavailable || []).filter(d => d >= today).length;
-    const roles = state.roles.filter(r => M.canServe(p, r.id)).map(r => esc(r.name)).join('<span class="dot" aria-hidden="true">·</span>')
-      || 'No roles yet';
-    return `<button class="person" data-action="edit-person" data-id="${esc(p.id)}">
-      <span class="person-top">
-        <span class="mono large" aria-hidden="true">${esc(initials(p.name))}</span>
-        <span class="person-id"><span class="person-name">${esc(p.name)}</span><span class="person-roles">${roles}</span></span>
-        <span class="load" title="Services in ${esc(M.MONTHS[view.m - 1])}"><strong>${load}</strong><small>${esc(M.MONTHS[view.m - 1].slice(0, 3))}</small></span>
-      </span>
-      <span class="person-meta">
-        <span>${next ? `Next · ${esc(M.formatDate(next.service.date))}, ${esc(next.roles.map(r => r.name).join(', '))}` : 'Nothing coming up'}</span>
-        ${away ? `<span class="away-note">${away} date${away > 1 ? 's' : ''} away</span>` : ''}
-      </span>
+    const ranges = M.awayRanges(p.unavailable, today);
+    const away = ranges.length ? `${M.formatRange(ranges[0])}${ranges.length > 1 ? ` +${ranges.length - 1}` : ''}` : '';
+    const roles = state.roles.filter(r => M.canServe(p, r.id)).map(r => r.name);
+    const linked = Boolean(p.userId || M.personEmail(p));
+    return `<button class="person" data-action="edit-person" data-id="${esc(p.id)}" data-search="${esc(`${p.name} ${roles.join(' ')}`.toLowerCase())}" data-roles="${esc(p.roleIds.join(' '))}">
+      <span class="person-id">${avatar(p.name, photoOf(p))}<span class="person-text">
+        <span class="person-name">${esc(p.name)}</span>
+        ${isCloud() ? `<span class="person-link${linked ? ' on' : ''}">${linked ? 'Linked' : 'No sign-in'}</span>` : ''}
+        <span class="person-sub">${esc(roles.join(' · ') || 'No roles yet')}</span>
+        ${away ? `<span class="away-note">Away ${esc(away)}</span>` : ''}
+      </span></span>
+      <span class="person-roles">${roles.map(r => `<span class="role-pill">${esc(r)}</span>`).join('') || '<span class="muted">No roles yet</span>'}</span>
+      <span class="person-away${away ? ' on' : ''}">${esc(away || 'None set')}</span>
+      <span class="person-load" title="Services in ${esc(M.MONTHS[m - 1])}"><span class="dots${month.busy ? ' busy' : ''}" aria-hidden="true">${month.dots.map(on => `<i class="${on ? 'on' : ''}"></i>`).join('')}</span>
+        <span>${month.total ? `${month.load} of ${plural(month.total, 'service')}${month.busy ? ' · busy' : ''}` : 'No services'}</span></span>
+      <span class="person-next" title="${esc(next ? next.roles.map(r => r.name).join(', ') : '')}">${next ? esc(M.formatDate(next.service.date, { day: 'numeric', month: 'short' })) : '<span class="muted">None</span>'}</span>
+      <span class="icon-btn" aria-hidden="true">${ICONS.pencil}</span>
     </button>`;
   }).join('');
-  return toolbar + `<div class="cards">${cards}</div>`;
+  return `${phoneWidth.matches ? '<p class="list-count"></p>' : ministerFilters()}
+    <div class="directory"><div class="directory-head" aria-hidden="true"><span>Name</span><span>Roles</span><span>Away</span><span>This month</span><span>Next on</span><span></span></div>${rows}<p class="no-match" hidden>Nobody matches that search.</p></div>`;
 }
 
 function renderSeries() {
-  const list = state.series.slice().sort((a, b) => (b.start || '').localeCompare(a.start || ''));
-  const toolbar = `<div class="toolbar"><button class="btn primary" data-action="new-series">New series</button></div>`;
-  if (!list.length) return toolbar + emptyState('No sermon series yet', 'Create a series, give it dates and a colour, and the Preaching tab will show it.');
-  const cards = list.map(s => {
-    const sermons = M.sortServices(state.services.filter(x => x.sermon?.seriesId === s.id));
-    const range = s.start && s.end ? `${M.formatDate(s.start, { day: 'numeric', month: 'short', year: 'numeric' })} – ${M.formatDate(s.end, { day: 'numeric', month: 'short', year: 'numeric' })}` : 'No dates set';
-    const items = sermons.map((x, i) => `<li><span class="li-num">${i + 1}</span>
-      <span class="li-body"><span class="li-title">${esc(x.sermon.title) || '<em>Title to come</em>'}</span>
-      <span class="li-meta">${esc(M.formatDate(x.date, { day: 'numeric', month: 'short' }))}${x.sermon.scripture ? ` · ${esc(x.sermon.scripture)}` : ''}</span></span></li>`).join('');
-    return `<article class="series-card" style="--series:${esc(s.color)}">
-      <header class="cover">
-        <span class="cover-eyebrow">${sermons.length} sermon${sermons.length === 1 ? '' : 's'}</span>
-        <h2>${esc(s.name)}</h2>
-        <span class="cover-range">${esc(range)}</span>
-        <button class="btn small on-cover" data-action="edit-series" data-id="${esc(s.id)}">Edit</button>
-      </header>
-      <div class="series-body">
-        ${s.description ? `<p class="series-desc">${esc(s.description)}</p>` : ''}
-        ${items ? `<ol class="sermon-list">${items}</ol>` : '<p class="muted">No services tagged with this series yet.</p>'}
+  if (!state.series.length) return emptyState('No sermon series yet', 'Create a series, give it dates and a colour, and the Preaching tab will show it.');
+  const today = M.todayISO();
+  const statuses = M.seriesStatuses(state, today);
+  const rank = { current: 0, next: 1, planned: 2, draft: 2, past: 3 };
+  const list = state.series.slice().sort((a, b) => rank[statuses.get(a.id)] - rank[statuses.get(b.id)]
+    || (statuses.get(a.id) === 'past' ? (b.start || '').localeCompare(a.start || '') : (a.start || '9').localeCompare(b.start || '9')));
+  const line = M.seriesTimeline(state.series, today);
+  const timeline = phoneWidth.matches || !line.rows.length ? '' : `<section class="timeline" aria-label="Series timeline">
+      <h2 class="panel-label">Timeline</h2>
+      <div class="tl-heads">${line.heads.map(h => `<span style="left:${h.left.toFixed(2)}%">${esc(h.label)}</span>`).join('')}</div>
+      <div class="tl-rows">
+        ${line.rows.map(r => {
+          const draft = statuses.get(r.series.id) === 'draft';
+          return `<div class="tl-row"><button class="tl-bar${draft ? ' draft' : ''}" data-action="edit-series" data-id="${esc(r.series.id)}" style="left:${r.left.toFixed(2)}%;width:${r.width.toFixed(2)}%;--series:${esc(r.series.color)}">${esc(r.series.name)}${draft ? ' · draft' : ''}</button></div>`;
+        }).join('')}
+        <div class="tl-today" style="left:${line.today.toFixed(2)}%"><span>Today</span></div>
       </div>
+    </section>`;
+  const cards = list.map(s => {
+    const count = state.services.filter(x => x.sermon?.seriesId === s.id).length;
+    const status = statuses.get(s.id);
+    return `<article class="series-card${status === 'past' ? ' past' : ''}" style="--series:${esc(s.color)}">
+      <div class="series-top"><span class="badge">${M.SERIES_STATUS[status]}</span><span>${plural(count, 'part')}</span></div>
+      <h2>${esc(s.name)}</h2>
+      <p class="series-range">${s.start && s.end ? esc(dateRange(s.start, s.end)) : 'No dates set'}</p>
+      ${s.description ? `<p class="series-desc">${esc(s.description)}</p>` : ''}
+      <footer class="series-foot"><span>${plural(count, 'service')} linked</span><button class="btn" data-action="edit-series" data-id="${esc(s.id)}">Edit</button></footer>
     </article>`;
   }).join('');
-  return toolbar + `<div class="series-grid">${cards}</div>`;
+  return `${timeline}<section class="series-grid" aria-label="All series">${cards}</section>`;
 }
+
+const roleRow = (r, isNew = false) => `<div class="role-row" data-role="${esc(r.id)}"${isNew ? ' data-new="1"' : ''}>
+    <button type="button" class="drag-handle" aria-label="Move ${esc(r.name)}. Drag, or use the arrow keys.">${ICONS.grip}</button>
+    <input name="role-name" value="${esc(r.name)}" aria-label="Role name" required maxlength="40">
+    <label class="inline-field"><span class="label-text">People</span> <input name="role-slots" type="number" min="1" max="12" value="${Number(r.slots) || 1}" aria-label="People needed for ${esc(r.name)}"></label>
+    ${r.id === M.PREACHER_ROLE ? '<span class="role-lock" title="Used by Preaching"></span>' : `<button type="button" class="role-remove" data-action="delete-role" data-id="${esc(r.id)}" aria-label="Remove ${esc(r.name)}">${ICONS.close}</button>`}
+  </div>`;
 
 function renderSettings() {
   const s = state.settings;
   const days = M.WEEKDAYS.map((d, i) => `<option value="${i}" ${Number(s.defaultDay) === i ? 'selected' : ''}>${d}</option>`).join('');
-  const roles = state.roles.map(r => `<div class="role-row" data-role="${esc(r.id)}">
-      <input name="role-name" value="${esc(r.name)}" aria-label="Role name" required maxlength="40">
-      <label class="inline-field">People <input name="role-slots" type="number" min="1" max="12" value="${Number(r.slots) || 1}" aria-label="People needed for ${esc(r.name)}"></label>
-      ${r.id === M.PREACHER_ROLE ? '<span class="muted small">Used by Preaching</span>' : `<button type="button" class="btn small danger" data-action="delete-role" data-id="${esc(r.id)}">Remove</button>`}
-    </div>`).join('');
   const theme = currentTheme();
-  const themeBtn = (v, label) => `<button type="button" class="seg${theme === v ? ' on' : ''}" data-action="theme" data-value="${v}" aria-pressed="${theme === v}">${label}</button>`;
+  const themeCard = (v, label) => `<button type="button" class="theme-card" data-action="theme" data-value="${v}" aria-pressed="${theme === v}"><span class="swatch ${v}"></span>${label}</button>`;
   return `<div class="settings">
     <form class="panel" id="settings-form">
       <h2>Church</h2>
-      <label>Church name <input name="churchName" value="${esc(s.churchName)}" required maxlength="80"></label>
-      <div class="row3">
-        <label>Usual service day <select name="defaultDay">${days}</select></label>
-        <label>Usual time <input name="defaultTime" type="time" value="${esc(s.defaultTime)}"></label>
+      <div class="row2">
+        <label>Church name <input name="churchName" value="${esc(s.churchName)}" required maxlength="80"></label>
         <label>Service name <input name="serviceName" value="${esc(s.serviceName)}" maxlength="60"></label>
       </div>
-      <button class="btn primary">Save</button>
+      <div class="row2">
+        <label>Usual service day <select name="defaultDay">${days}</select></label>
+        <label>Usual service time <input name="defaultTime" type="time" value="${esc(s.defaultTime)}"></label>
+      </div>
     </form>
     <form class="panel" id="roles-form">
-      <h2>Roles</h2>
-      <p class="muted">The columns on the Schedule. "People" is how many each service needs.</p>
-      <div id="role-rows">${roles}</div>
-      <div class="row-actions"><button type="button" class="btn" data-action="add-role">Add a role</button><button class="btn primary">Save roles</button></div>
+      <div class="panel-head"><h2>Roles</h2><p class="muted">These become the columns on the Schedule. Drag to reorder. "People" is how many each service needs.</p></div>
+      <div id="role-rows" class="row-list">${state.roles.map(r => roleRow(r)).join('')}</div>
+      <div class="add-role">
+        <label>Add a role <input id="new-role" placeholder="e.g. Communion" maxlength="40" autocomplete="off"></label>
+        <button type="button" class="btn" data-action="add-role">Add role</button>
+      </div>
     </form>
     <section class="panel">
-      <h2>Appearance</h2>
-      <div class="segmented" role="group" aria-label="Theme">${themeBtn('system', 'System')}${themeBtn('light', 'Light')}${themeBtn('dark', 'Dark')}</div>
+      <h2>Theme</h2>
+      <div class="theme-grid" role="group" aria-label="Appearance">${themeCard('light', 'Light')}${themeCard('dark', 'Dark')}${themeCard('system', 'Match device')}</div>
     </section>
-    <section class="panel">
-      <h2>Your data</h2>
-      <p class="muted">${isCloud()
-        ? 'Synced online: everyone in this church sees the same schedule. A backup is still worth exporting now and then.'
-        : 'Saved in this browser only. To share it with your team across devices, tap the sync button (bottom of the menu, or top right on a phone). Export a backup now and then.'}</p>
+    <section class="panel split">
+      <div><h2>Backup</h2>
+        <p>${isCloud()
+          ? 'Synced online: everyone in this church sees the same schedule. A backup file is still worth exporting now and then.'
+          : 'Everything is stored in this browser only. Export a backup file regularly, and import it to move to another computer. To share with your team, use the sync button.'}</p></div>
       <div class="row-actions">
-        <button type="button" class="btn" data-action="export">Export backup</button>
         <label class="btn">Import backup<input type="file" accept="application/json,.json" id="import-file" hidden></label>
+        <button type="button" class="btn primary" data-action="export">Export backup</button>
+      </div>
+    </section>
+    <section class="panel split">
+      <div><h2>Start over</h2><p>Try the app with a sample church, or clear everything out.</p></div>
+      <div class="row-actions">
         <button type="button" class="btn" data-action="load-sample">Load sample data</button>
         <button type="button" class="btn danger" data-action="clear-all">Clear everything</button>
       </div>
@@ -344,9 +587,9 @@ function renderSettings() {
 
 const dialog = () => $('#modal');
 
-function openDialog(html, { onSubmit, onMount, wide = false } = {}) {
+function openDialog(html, { onSubmit, onMount, wide = false, className = '' } = {}) {
   const d = dialog();
-  d.classList.toggle('wide', wide);
+  d.className = `${wide ? 'wide ' : ''}${className}`.trim();
   // The first submit button is the one Enter presses, so a hidden Save goes first;
   // otherwise Enter in a text box would hit Close or Delete.
   d.innerHTML = `<form method="dialog" class="dialog-form"><button value="save" class="enter-saves" tabindex="-1" aria-hidden="true"></button>${html}</form>`;
@@ -367,6 +610,13 @@ function openDialog(html, { onSubmit, onMount, wide = false } = {}) {
 
 const dialogHead = (title, sub = '') => `<header class="dialog-head"><div><h2>${esc(title)}</h2>${sub ? `<p class="muted">${esc(sub)}</p>` : ''}</div>
   <button type="button" class="icon-btn" onclick="this.closest('dialog').close()" aria-label="Close">&times;</button></header>`;
+
+// Open a follow-up sheet once this one has closed. If it already closed (Esc during a slow
+// save), wait a tick so the form's own close() runs first.
+function whenClosed(fn) {
+  if (dialog().open) dialog().addEventListener('close', fn, { once: true });
+  else setTimeout(fn, 0);
+}
 
 // ----- service editor -----
 
@@ -419,31 +669,30 @@ function serviceFormBody(svc) {
   const series = state.series.slice().sort((a, b) => (b.start || '').localeCompare(a.start || ''))
     .map(s => `<option value="${esc(s.id)}" ${s.id === svc.sermon.seriesId ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
   return `
-    <div class="row3">
+    <div class="when-fields">
       <label>Date <input name="date" type="date" value="${esc(svc.date)}" required></label>
       <label>Time <input name="time" type="time" value="${esc(svc.time)}"></label>
       <label>Service <input name="name" value="${esc(svc.name)}" maxlength="60"></label>
     </div>
-    <fieldset class="sermon-fields">
-      <legend>Sermon</legend>
+    <section class="sheet-section" aria-label="Sermon">
+      <h3>Sermon</h3>
       <label>Title <input name="sermon-title" value="${esc(svc.sermon.title)}" maxlength="120" placeholder="e.g. Rooted in Christ"></label>
       <div class="row2">
         <label>Scripture <input name="sermon-scripture" value="${esc(svc.sermon.scripture)}" maxlength="120" placeholder="e.g. Colossians 1:15-20"></label>
         <label>Series <select name="sermon-series"><option value="">No series</option>${series}</select></label>
       </div>
-    </fieldset>
-    <fieldset>
-      <legend>Who is serving</legend>
+    </section>
+    <section class="sheet-section" aria-label="Who is serving">
+      <header class="sheet-section-head"><h3>Who is serving</h3><button type="button" class="link-btn" data-local="autofill">Auto-fill open slots</button></header>
       <div class="roles">${roles}</div>
-    </fieldset>
-    <fieldset class="setlist-fields">
-      <legend>Setlist</legend>
+      <div class="conflicts" aria-live="polite"></div>
+    </section>
+    <section class="sheet-section" aria-label="Setlist">
+      <header class="sheet-section-head"><h3>Setlist</h3><button type="button" class="link-btn" data-song="add">Add a song</button></header>
       <ol class="setlist">${(svc.setlist || []).map(songRow).join('')}</ol>
-      <div><button type="button" class="btn small" data-song="add">Add a song</button></div>
       <datalist id="song-library">${M.songLibrary(state.services).map(s => `<option value="${esc(s.title)}">${s.key ? `Key of ${esc(s.key)}` : ''}</option>`).join('')}</datalist>
-    </fieldset>
-    <label>Notes <textarea name="notes" rows="2" maxlength="500">${esc(svc.notes)}</textarea></label>
-    <div class="conflicts" aria-live="polite"></div>`;
+    </section>
+    <section class="sheet-section"><label>Notes <textarea name="notes" rows="2" maxlength="500">${esc(svc.notes)}</textarea></label></section>`;
 }
 
 function readServiceForm(form, base) {
@@ -487,12 +736,11 @@ function openServiceEditor(existing, date) {
   const title = isNew ? 'New service' : M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const actions = `<footer class="dialog-actions">
     ${isNew ? '' : '<button class="btn danger" value="delete" formnovalidate>Delete</button>'}
-    <button type="button" class="btn" data-local="autofill">Auto-fill open slots</button>
     <span class="spacer"></span>
     <button class="btn" value="cancel" formnovalidate>Cancel</button>
     <button class="btn primary" value="save">Save</button>
   </footer>`;
-  openDialog(dialogHead(title, isNew ? '' : [svc.time, svc.name].filter(Boolean).join(' · ')) + `<div class="dialog-body">${serviceFormBody(svc)}</div>` + actions, {
+  openDialog(dialogHead(title, isNew ? '' : [svc.time, svc.name].filter(Boolean).join(' · ')) + `<div class="dialog-body service-form">${serviceFormBody(svc)}</div>` + actions, {
     wide: true,
     onMount(form) {
       const refresh = () => showConflicts(form, readServiceForm(form, svc));
@@ -520,6 +768,7 @@ function openServiceEditor(existing, date) {
         else if (e.target.value.trim()) addSong($('.setlist', form));
       });
       form.addEventListener('click', e => {
+        if (e.target.closest('[data-local="autofill"]')) return autofill();
         const btn = e.target.closest('[data-song]');
         if (!btn) return;
         const list = $('.setlist', form);
@@ -534,14 +783,15 @@ function openServiceEditor(existing, date) {
           row.remove();
         }
       });
-      $('[data-local="autofill"]', form).addEventListener('click', () => {
+      // Delegated above: this button is redrawn along with the rest of the sheet.
+      const autofill = () => {
         const current = readServiceForm(form, svc);
         if (!current.date) { form.elements.date.reportValidity(); return; }
         svc = M.autoFill(state, current);
         $('.dialog-body', form).innerHTML = serviceFormBody(svc);
         refresh();
         toast('Open slots filled with available people who have served least this month.');
-      });
+      };
     },
     async onSubmit(form, action) {
       if (action === 'delete') {
@@ -551,23 +801,95 @@ function openServiceEditor(existing, date) {
         return false;
       }
       const next = readServiceForm(form, svc);
-      const added = M.addedAssignments(isNew ? null : existing, next);
       await putDoc('services', next);
       const { y, m } = M.parseISO(next.date);
       if (y !== view.y || m !== view.m) { view.y = y; view.m = m; }
+      view.day = next.id;
       toast('Service saved.');
-      // Putting yourself on a service shouldn't also pop up "You're on…" over "Service saved."
-      const self = me();
-      if (self && added.has(self.id)) added.get(self.id).forEach(r => mine.announced.add(M.assignmentKey(next, r)));
-      // Offer to message whoever was just put on it, once this dialog has closed. If it was
-      // already closed (Esc during a slow save), wait a tick so the form's own close() runs first.
-      if (added.size) {
-        if (dialog().open) dialog().addEventListener('close', () => openNotify(next, added), { once: true });
-        else setTimeout(() => openNotify(next, added), 0);
-      }
+      // Offer to message whoever was just put on it.
+      afterAssigning(isNew ? null : existing, next, true);
       return false;
     },
   });
+}
+
+// ----- assign one place on one service -----
+
+function openAssign(serviceId, roleId, slot) {
+  const svc = state.services.find(s => s.id === serviceId);
+  const role = state.roles.find(r => r.id === roleId);
+  if (!svc || !role) return;
+  const { current, available, unavailable } = M.assignOptions(state, svc, roleId, slot);
+  const weekdayName = M.formatDate(svc.date, { weekday: 'long' });
+  const when = M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '');
+  const row = ({ person, note }) => `<label class="pick" data-search="${esc(person.name.toLowerCase())}">
+      <input type="radio" name="minister" value="${esc(person.id)}" ${person.id === current ? 'checked' : ''}>
+      ${avatar(person.name, photoOf(person))}
+      <span class="pick-text"><span class="pick-name">${esc(person.name)}</span><span class="pick-note">${esc(note)}</span></span></label>`;
+  const off = ({ person, note }) => `<div class="pick off" data-search="${esc(person.name.toLowerCase())}">
+      ${avatar(person.name, photoOf(person))}
+      <span class="pick-text"><span class="pick-name">${esc(person.name)}</span><span class="pick-note">${esc(note)}</span></span></div>`;
+  const head = `<header class="dialog-head back-head">
+      <button type="button" class="icon-btn" onclick="this.closest('dialog').close()" aria-label="Back">${ICONS.back}</button>
+      <div><h2>Assign ${esc(role.name.toLowerCase())}</h2><p class="muted">${esc(when)} · ${esc(M.roleGroups([role])[0].name)}</p></div>
+    </header>
+    <div class="assign-find"><label>Search ministers
+      <span class="search-box">${ICONS.search}<input id="assign-search" type="search" placeholder="Name" autocomplete="off"></span></label></div>`;
+  const body = `<div class="dialog-body">
+      ${available.length ? `<section><h3 class="pick-title">Available · ${esc(role.name.toLowerCase())}</h3><div class="pick-list">${available.map(row).join('')}</div></section>`
+        : '<p class="hint">Nobody is free for this role. Tick it on a profile under Ministers, or open the service to pick anyone.</p>'}
+      ${unavailable.length ? `<section><h3 class="pick-title">Unavailable this ${esc(weekdayName)}</h3><div class="pick-list">${unavailable.map(off).join('')}</div></section>` : ''}
+      <label class="check-row"><input type="checkbox" name="notify" checked>Let them know after saving</label>
+    </div>`;
+  const footer = `<footer class="dialog-actions">
+      ${current ? '<button class="btn danger big-btn" style="flex:0 0 auto" value="delete" formnovalidate>Remove</button>' : ''}
+      <button class="btn primary big-btn assign-go" value="save" disabled>Choose someone</button>
+    </footer>`;
+  openDialog(head + body + footer, {
+    className: 'assign-sheet',
+    onMount(form) {
+      const go = $('.assign-go', form);
+      const chosen = () => $('input[name="minister"]:checked', form)?.value || '';
+      const refresh = () => {
+        const id = chosen();
+        go.disabled = !id || id === current;
+        go.textContent = id && id !== current ? `Assign ${personName(id)}` : current ? 'Choose someone else' : 'Choose someone';
+      };
+      refresh();
+      form.addEventListener('change', refresh);
+      const find = $('#assign-search', form);
+      find.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+      find.addEventListener('input', () => {
+        const q = find.value.trim().toLowerCase();
+        for (const el of $$('.pick', form)) el.hidden = !el.dataset.search.includes(q);
+        for (const list of $$('.pick-list', form)) list.closest('section').hidden = !$$('.pick:not([hidden])', list).length;
+      });
+    },
+    async onSubmit(form, action) {
+      const id = $('input[name="minister"]:checked', form)?.value || '';
+      if (action !== 'delete' && (!id || id === current)) return true;
+      const fresh = state.services.find(s => s.id === serviceId);
+      if (!fresh) return false;
+      const list = [...M.assigned(fresh, roleId)];
+      if (action === 'delete') list.splice(slot, 1);
+      else list[slot] = id;
+      const assignments = { ...fresh.assignments, [roleId]: list.filter(Boolean) };
+      if (!assignments[roleId].length) delete assignments[roleId];
+      const next = { ...fresh, assignments };
+      await putDoc('services', next);
+      toast(action === 'delete' ? `${personName(current)} removed.` : `${personName(id)} assigned.`);
+      if (action !== 'delete') afterAssigning(fresh, next, form.elements.notify.checked);
+      return false;
+    },
+  });
+}
+
+// Putting yourself on a service shouldn't also pop up "You're on…" over the save message.
+function afterAssigning(before, next, offerMessage) {
+  const added = M.addedAssignments(before, next);
+  const self = me();
+  if (self && added.has(self.id)) added.get(self.id).forEach(r => mine.announced.add(M.assignmentKey(next, r)));
+  if (offerMessage && added.size) whenClosed(() => openNotify(next, added));
 }
 
 // ----- person editor -----
@@ -584,14 +906,40 @@ function openPersonEditor(existing) {
     : '<p class="muted">Not on any upcoming service.</p>';
   const awayList = () => person.unavailable.slice().sort().map(d => `<li><span>${esc(M.formatDate(d, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</span>
     <button type="button" class="icon-btn small" data-remove-date="${esc(d)}" aria-label="Remove ${esc(d)}">&times;</button></li>`).join('') || '<li class="muted">None</li>';
+  // How this minister signs in. With no email yet, three ways forward: send an invite,
+  // pick someone already registered in this church, or leave it blank.
+  let linkMode = 'blank';
+  let draftEmail = person.email;
+  const memberChoices = () => {
+    const taken = new Set(state.people.filter(p => p.id !== person.id && p.userId).map(p => p.userId));
+    return Object.entries(cloudState.info?.memberNames || {}).filter(([uid]) => !taken.has(uid)).sort((a, b) => a[1].localeCompare(b[1]));
+  };
+  const emailBox = (label, hint) => `<label>${label} <input name="email" type="email" value="${esc(draftEmail)}" maxlength="120" autocomplete="off" inputmode="email"></label>
+    <p class="hint">${hint}</p>`;
+  const signInHtml = () => {
+    if (person.userId && !person.email) {
+      const name = cloudState.info?.memberNames?.[person.userId] || 'a registered user';
+      return `<div class="linked-row"><span>Linked to <strong>${esc(name)}</strong></span><button type="button" class="link-btn" data-link="unlink">Unlink</button></div>`;
+    }
+    if (!isCloud()) return emailBox('Email', 'Put your church online (the sync button) to invite people or link them to an account.');
+    if (person.email) return emailBox('Email', 'When they sign in with this email, the app shows them every service they\'re put on.');
+    const seg = (mode, label) => `<button type="button" class="seg${linkMode === mode ? ' on' : ''}" data-link-mode="${mode}" aria-pressed="${linkMode === mode}">${label}</button>`;
+    const members = memberChoices();
+    const detail = {
+      invite: emailBox('Their email (optional)', 'After you save, you can send them their invite link. Opening it links their account to this minister.'),
+      member: members.length
+        ? `<label>Registered user <select name="member" required><option value="">Choose someone</option>${members.map(([uid, name]) => `<option value="${esc(uid)}">${esc(name)}</option>`).join('')}</select></label>`
+        : '<p class="hint">Everyone registered in this church is already linked. Send an invite instead.</p>',
+      blank: '<p class="hint">They stay on the roster without a sign-in. You can link them any time.</p>',
+    }[linkMode];
+    return `<div class="segmented link-choice" role="group" aria-label="How this minister signs in">${seg('invite', 'Send an invite')}${seg('member', 'Registered user')}${seg('blank', 'Leave blank')}</div>${detail}`;
+  };
   openDialog(dialogHead(isNew ? 'New minister' : person.name) + `<div class="dialog-body">
       <div class="row2">
         <label>Name <input name="name" value="${esc(person.name)}" required maxlength="60" autocomplete="off"></label>
         <label>Phone <input name="contact" type="tel" value="${esc(person.contact)}" maxlength="40" autocomplete="off" inputmode="tel"></label>
       </div>
-      <label>Email <input name="email" type="email" value="${esc(person.email)}" maxlength="120" autocomplete="off" inputmode="email"
-        placeholder="The one they sign in with"></label>
-      <p class="hint">When they sign in with this email, the app shows them every service they're put on.</p>
+      <fieldset><legend>Sign-in</legend><div class="signin-slot">${signInHtml()}</div></fieldset>
       <fieldset><legend>Can serve as</legend><div class="checks">${roles}</div></fieldset>
       <fieldset><legend>Away dates</legend>
         <div class="add-date"><input type="date" name="away" aria-label="Date away"><button type="button" class="btn" data-local="add-date">Add date</button></div>
@@ -607,7 +955,25 @@ function openPersonEditor(existing) {
     </footer>`, {
     onMount(form) {
       const redraw = () => { $('.away', form).innerHTML = awayList(); };
-      form.elements.email.addEventListener('input', () => form.elements.email.setCustomValidity(''));
+      const redrawSignIn = () => {
+        draftEmail = form.elements.email?.value ?? draftEmail;
+        $('.signin-slot', form).innerHTML = signInHtml();
+      };
+      form.addEventListener('input', e => { if (e.target.name === 'email') e.target.setCustomValidity(''); });
+      form.addEventListener('click', e => {
+        const mode = e.target.closest('[data-link-mode]')?.dataset.linkMode;
+        if (mode) { linkMode = mode; redrawSignIn(); }
+        if (e.target.closest('[data-link="unlink"]')) { person.userId = ''; redrawSignIn(); }
+      });
+      // Someone may have joined since the church opened: list the current members.
+      if (isCloud()) {
+        import('./cloud.js').then(C => C.churchInfo(cloudState.churchId)).then(fresh => {
+          if (!fresh) return;
+          cloudState.info = fresh;
+          // Only the member list needs the fresh names; never redraw under someone's finger.
+          if (form.isConnected && linkMode === 'member' && !form.elements.member?.value && !$('.signin-slot', form).contains(document.activeElement)) redrawSignIn();
+        }).catch(() => {});
+      }
       $('[data-local="add-date"]', form).addEventListener('click', () => {
         const v = form.elements.away.value;
         if (!M.isValidISO(v)) { form.elements.away.focus(); return; }
@@ -624,17 +990,20 @@ function openPersonEditor(existing) {
     },
     async onSubmit(form, action) {
       if (action === 'delete') {
-        if (!confirm(`Delete ${person.name}? They will be removed from every service.`)) return true;
+        if (!confirm(`Delete ${person.name}? They will be removed from every service and task.`)) return true;
         const before = state.services;
         const after = M.removePersonEverywhere(before, person.id);
-        await putChangedServices(before, after);
+        await putChanged('services', before, after);
         state.services = after;
+        const tasks = M.removePersonFromTasks(state.tasks, person.id);
+        await putChanged('tasks', state.tasks, tasks);
+        state.tasks = tasks;
         await deleteDoc('people', person.id);
         if (view.focus === person.id) view.focus = '';
         toast('Minister deleted.');
         return false;
       }
-      const email = M.normEmail(form.elements.email.value);
+      const email = M.normEmail(form.elements.email?.value ?? person.email);
       const twin = email && state.people.find(p => p.id !== person.id && M.personEmail(p) === email);
       if (twin) {
         form.elements.email.setCustomValidity(`${twin.name} already uses this email.`);
@@ -644,15 +1013,20 @@ function openPersonEditor(existing) {
       // a date typed but not "added" still counts
       const pending = form.elements.away.value;
       if (M.isValidISO(pending) && !person.unavailable.includes(pending)) person.unavailable.push(pending);
-      await putDoc('people', {
+      // Clearing the email box also clears the link it made.
+      const userId = form.elements.member ? form.elements.member.value : form.elements.email && !email ? '' : person.userId || '';
+      const saved = {
         ...person,
+        userId,
         name: form.elements.name.value.trim(),
         contact: form.elements.contact.value.trim(),
         email,
         roleIds: $$('input[name="roles"]:checked', form).map(i => i.value),
         unavailable: person.unavailable.slice().sort(),
-      });
+      };
+      await putDoc('people', saved);
       toast(isNew ? 'Minister added.' : 'Minister saved.');
+      if (form.querySelector('[data-link-mode="invite"].on')) whenClosed(() => openInvite(saved));
       return false;
     },
   });
@@ -698,7 +1072,7 @@ function openSeriesEditor(existing) {
         if (!confirm(`Delete the series "${series.name}"? Sermons keep their titles; they just lose the series tag.`)) return true;
         const before = state.services;
         const after = M.clearSeriesEverywhere(before, series.id);
-        await putChangedServices(before, after);
+        await putChanged('services', before, after);
         state.services = after;
         await deleteDoc('series', series.id);
         toast('Series deleted.');
@@ -734,31 +1108,186 @@ function openSeriesEditor(existing) {
   });
 }
 
-// ---------- settings actions ----------
+// ----- task editor -----
 
-function newRoleRow() {
-  const id = M.uid('role_');
-  return `<div class="role-row" data-role="${id}" data-new="1">
-    <input name="role-name" value="" placeholder="e.g. Ushers" aria-label="Role name" required maxlength="40">
-    <label class="inline-field">People <input name="role-slots" type="number" min="1" max="12" value="1" aria-label="People needed"></label>
-    <button type="button" class="btn small danger" data-action="delete-role" data-id="${id}">Remove</button></div>`;
+function openTaskEditor(existing, week) {
+  const isNew = !existing;
+  const day = state.settings.defaultDay;
+  const task = existing ? structuredClone(existing) : M.newTask({ week });
+  task.week = M.weekOfDate(task.week, day);
+  // The task's own month and the ones either side, so it can move without hunting for a date.
+  const { y, m } = M.parseISO(task.week);
+  const weekOptions = [-1, 0, 1].flatMap(delta => { const mo = M.shiftMonth(y, m, delta); return M.weeksInMonth(mo.y, mo.m, day); })
+    .map(w => `<option value="${w.end}" ${w.end === task.week ? 'selected' : ''}>${esc(M.formatDate(w.end))}</option>`).join('');
+  const people = state.people.slice().sort((a, b) => a.name.localeCompare(b.name));
+  // Same hints as the role dropdowns: who is away that service day, and who already has a lot on.
+  const checks = (picked, weekEnd) => people.map(p => {
+    const others = M.tasksInWeek(state.tasks, weekEnd, day).filter(t => t.id !== task.id && t.assignees.includes(p.id)).length;
+    const notes = [];
+    if (M.isUnavailable(p, weekEnd)) notes.push(`away ${M.formatDate(weekEnd, { weekday: 'short' })}`);
+    if (others) notes.push(`${others} this week`);
+    return `<label class="check"><input type="checkbox" name="assignees" value="${esc(p.id)}" ${picked.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}${notes.length ? ` <span class="muted small">(${esc(notes.join(', '))})</span>` : ''}</label>`;
+  }).join('') || '<p class="hint">Add ministers on the Ministers tab, then assign them here.</p>';
+  openDialog(dialogHead(isNew ? 'New task' : task.title) + `<div class="dialog-body">
+      <label>Task <input name="title" value="${esc(task.title)}" required pattern=".*\\S.*" title="Give the task a name" maxlength="120" placeholder="e.g. Send the slides to Tech" autocomplete="off"></label>
+      <label>Week ending <select name="week">${weekOptions}</select></label>
+      <fieldset><legend>Assigned to</legend><div class="assignees">${checks(task.assignees, task.week)}</div></fieldset>
+      <label>Notes <textarea name="notes" rows="2" maxlength="500">${esc(task.notes)}</textarea></label>
+    </div>
+    <footer class="dialog-actions">
+      ${isNew ? '' : '<button class="btn danger" value="delete" formnovalidate>Delete</button>'}
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save</button>
+    </footer>`, {
+    onMount(form) {
+      form.addEventListener('change', e => {
+        if (e.target.name !== 'week') return;
+        const picked = $$('input[name="assignees"]:checked', form).map(i => i.value);
+        $('.assignees', form).innerHTML = checks(picked, e.target.value);
+      });
+    },
+    async onSubmit(form, action) {
+      if (action === 'delete') {
+        if (!confirm(`Delete the task "${task.title}"?`)) return true;
+        await deleteDoc('tasks', task.id);
+        toast('Task deleted.');
+        return false;
+      }
+      // Left on the same week, the stored date stays as it was, so the bell doesn't call an edit new.
+      const week = form.elements.week.value;
+      const next = {
+        ...task,
+        title: form.elements.title.value.trim(),
+        week: existing && week === task.week ? existing.week : week,
+        assignees: $$('input[name="assignees"]:checked', form).map(i => i.value),
+        notes: form.elements.notes.value.trim(),
+      };
+      const added = M.addedTaskPeople(isNew ? null : task, { ...next, week });
+      await putDoc('tasks', next);
+      ({ y: view.y, m: view.m } = M.parseISO(week));
+      toast(isNew ? 'Task added.' : 'Task saved.');
+      // Giving yourself a task shouldn't also pop up "You have a task" over "Task saved."
+      const self = me();
+      if (self && added.includes(self.id)) mine.announced.add(M.taskKey(next));
+      if (added.length) whenClosed(() => openTaskNotify(next, added));
+      return false;
+    },
+  });
 }
 
-async function saveRoles(form) {
-  const rows = $$('.role-row', form);
+async function setTaskDone(id, done) {
+  const task = state.tasks.find(t => t.id === id);
+  if (!task) return;
+  await putDoc('tasks', { ...task, done });
+  render();
+  $(`[data-task-done="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); // the redraw replaced the box just ticked
+}
+
+// ---------- settings actions ----------
+
+function saveChurch(form) {
+  const f = form.elements;
+  const churchName = f.churchName.value.trim() || state.settings.churchName;
+  f.churchName.value = churchName;
+  state.settings = { ...state.settings, churchName, defaultDay: Number(f.defaultDay.value), defaultTime: f.defaultTime.value, serviceName: f.serviceName.value.trim() || 'Service' };
+  $('#church-name').textContent = churchName;
+  document.title = `${churchName} · Ministry Scheduler`;
+  Promise.resolve(store.putSettings(state.settings)).then(ok => { afterWrite(ok); toast('Saved.'); })
+    .catch(err => toast(`Not saved: ${err.message || err}`, 'warn'));
+}
+
+let rolesSaving = Promise.resolve();
+const removedRoles = new Set();
+
+// Saves in order, so a quick rename then a drag can't land the wrong way round.
+function saveRoles() {
+  rolesSaving = rolesSaving.then(writeRoles).catch(err => toast(`Not saved: ${err.message || err}`, 'warn'));
+  return rolesSaving;
+}
+
+// Writes only the role documents that changed.
+async function writeRoles() {
+  const rows = $$('#role-rows .role-row');
   const roles = rows.map((row, order) => ({
     id: row.dataset.role,
     order,
     name: $('[name="role-name"]', row).value.trim(),
     slots: Math.min(12, Math.max(1, parseInt($('[name="role-slots"]', row).value, 10) || 1)),
   }));
-  // Role order matters (it is the column order), so this saves the whole state in one go.
-  const keep = new Set(roles.map(r => r.id));
-  let services = state.services;
-  for (const old of state.roles) if (!keep.has(old.id)) services = M.removeRoleEverywhere(services, old.id);
-  const people = state.people.map(p => ({ ...p, roleIds: p.roleIds.filter(r => keep.has(r)) }));
-  await replaceAll({ ...state, roles, services, people });
-  toast('Roles saved.');
+  // These rows can be a moment behind another editor, so a role only counts as gone when it was
+  // removed here, and only a row added here can create one.
+  const gone = new Set(removedRoles);
+  removedRoles.clear();
+  const isGone = id => gone.has(id);
+  const was = new Map(state.roles.map(r => [r.id, r]));
+  if (gone.size) {
+    let services = state.services;
+    for (const id of gone) services = M.removeRoleEverywhere(services, id);
+    await putChanged('services', state.services, services);
+    state.services = services;
+    const people = state.people.map(p => (p.roleIds.some(isGone) ? { ...p, roleIds: p.roleIds.filter(r => !isGone(r)) } : p));
+    await putChanged('people', state.people, people);
+    state.people = people;
+    for (const id of gone) await deleteDoc('roles', id);
+  }
+  for (const [i, r] of roles.entries()) {
+    const old = was.get(r.id);
+    if (!r.name || (!old && !rows[i].dataset.new)) continue; // a blank name waits until it has one
+    delete rows[i].dataset.new;
+    if (!old || old.name !== r.name || old.slots !== r.slots || old.order !== r.order) await putDoc('roles', r);
+  }
+  state.roles = state.roles.filter(r => !isGone(r.id)).sort((a, b) => a.order - b.order);
+  toast('Saved.');
+}
+
+function addRole() {
+  const input = $('#new-role');
+  const name = input.value.trim();
+  if (!name) { input.focus(); return; }
+  $('#role-rows').insertAdjacentHTML('beforeend', roleRow({ id: M.uid('role_'), name, slots: 1 }, true));
+  input.value = '';
+  input.focus();
+  saveRoles();
+}
+
+// Drag a role by its handle. Works with a mouse or a finger; the arrow keys do the same.
+function wireRoleDrag() {
+  document.addEventListener('pointerdown', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle || e.button) return;
+    e.preventDefault();
+    const row = handle.closest('.role-row');
+    const list = row.parentElement;
+    const before = row.nextElementSibling;
+    row.classList.add('dragging');
+    const move = ev => {
+      const over = [...list.children].find(r => r !== row && ev.clientY < r.getBoundingClientRect().top + r.offsetHeight / 2);
+      if (!over) list.append(row);
+      else if (row.nextElementSibling !== over) over.before(row);
+    };
+    const end = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', end);
+      document.removeEventListener('pointercancel', end);
+      row.classList.remove('dragging');
+      if (row.nextElementSibling !== before) saveRoles();
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
+  });
+  document.addEventListener('keydown', e => {
+    const handle = e.target.closest?.('.drag-handle');
+    if (!handle || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    const row = handle.closest('.role-row');
+    const other = e.key === 'ArrowUp' ? row.previousElementSibling : row.nextElementSibling;
+    if (!other) return;
+    if (e.key === 'ArrowUp') other.before(row); else other.after(row);
+    handle.focus();
+    saveRoles();
+  });
 }
 
 function exportBackup() {
@@ -775,7 +1304,7 @@ function exportBackup() {
 async function importBackup(file) {
   try {
     const next = M.normalizeState(JSON.parse(await file.text()));
-    if (!confirm(`Replace everything${isCloud() ? ' for everyone in this church' : ''} with this backup? (${next.services.length} services, ${next.people.length} ministers)`)) return;
+    if (!confirm(`Replace everything${isCloud() ? ' for everyone in this church' : ''} with this backup? (${next.services.length} services, ${next.tasks.length} tasks, ${next.people.length} ministers)`)) return;
     await replaceAll(next);
     toast('Backup imported.');
     render();
@@ -790,7 +1319,7 @@ async function importBackup(file) {
 // to a church; then it is that church's FirebaseStore.
 const cloudState = { ready: false, user: null, churchId: '', info: null, error: '', reopen: false };
 const JOIN_KEY = 'ministry-scheduler:join';
-const inviteLink = id => `${location.origin}${location.pathname}#join=${id}`;
+const inviteLink = (id, personId = '') => `${location.origin}${location.pathname}#join=${id}${personId ? `&as=${personId}` : ''}`;
 const isCloud = () => Boolean(cloudState.churchId);
 let loadSeq = 0;          // each store switch gets a number; a slower, older load is thrown away
 let opening = '';         // church id being opened right now (auth can fire twice)
@@ -805,6 +1334,8 @@ const session = {
 const pendingInvite = () => session.get() || session.mem;
 
 // Load first, switch second: a load that was overtaken (sign-out, another church) is discarded.
+const isTyping = () => document.activeElement?.matches('.main input:not([type="checkbox"]):not([type="file"]), .main textarea, .main .drag-handle') ?? false;
+
 async function useStore(next) {
   const seq = ++loadSeq;
   const loaded = await next.load();
@@ -812,7 +1343,7 @@ async function useStore(next) {
   unsubscribe();
   store = next;
   state = loaded;
-  unsubscribe = store.subscribe(s => { state = s; if (!dialog().open) render(); });
+  unsubscribe = store.subscribe(s => { state = s; if (!dialog().open && !isTyping()) render(); });
   render();
   return true;
 }
@@ -862,20 +1393,22 @@ async function cloudError(err) {
   toast(`Not saved to the cloud: ${err.message || err}`, 'warn');
 }
 
+// The card at the foot of the menu: a headline, then what it means for you.
 function accountLabel() {
-  if (!cloudState.ready) return 'Saved in this browser';
-  if (isCloud()) return `Synced · ${state.settings.churchName}`;
-  if (cloudState.user) return 'Signed in · this browser only';
-  return 'Saved in this browser · Sign in to sync';
+  if (!cloudState.ready) return ['Saved in this browser', 'Export a backup from Settings before clearing your browser data.'];
+  if (isCloud()) return ['Synced', state.settings.churchName];
+  if (cloudState.user) return ['Signed in', 'This browser only. Tap to put your church online.'];
+  return ['Saved in this browser', 'Sign in to sync with your team.'];
 }
 
 function renderAccountButton() {
   const btn = $('#account-btn');
   if (!btn) return;
-  const label = accountLabel();
-  btn.querySelector('.account-text').textContent = label;
-  btn.setAttribute('aria-label', `Account and sync: ${label}`);
-  btn.title = label;
+  const [title, sub] = accountLabel();
+  btn.querySelector('.account-text').textContent = title;
+  btn.querySelector('.account-sub').textContent = sub;
+  btn.setAttribute('aria-label', `Account and sync: ${title}. ${sub}`);
+  btn.title = `${title}. ${sub}`;
   btn.dataset.state = isCloud() ? 'synced' : cloudState.user ? 'signed-in' : 'local';
 }
 
@@ -905,15 +1438,31 @@ async function initCloud() {
   renderAccountButton();
 }
 
+// An invite sent to one minister links that minister to whoever accepts it, unless they already
+// have an account. Admins are skipped, so testing your own link doesn't make you that minister.
+async function claimInvitedPerson(personId) {
+  const { user } = cloudState;
+  const person = state.people.find(p => p.id === personId);
+  const already = M.findPersonForUser(state.people, user);
+  if (!person || !user || !isCloud() || person.userId || (already && already.id !== person.id)) return;
+  if (cloudState.info?.members?.[user.uid] === 'admin') return;
+  try {
+    await putDoc('people', { ...person, userId: user.uid, email: person.email || M.normEmail(user.email) });
+    render();
+  } catch { toast('You joined, but your profile could not be linked. Ask an admin to link it.', 'warn'); }
+}
+
 // Returns true when you end up in the invited church.
-async function acceptInvite(churchId, currentId = cloudState.churchId) {
-  if (currentId === churchId) { await useChurch(churchId); return true; }
+async function acceptInvite(invite, currentId = cloudState.churchId) {
+  const { churchId, personId } = M.parseInvite(invite);
+  if (currentId === churchId) { await useChurch(churchId); await claimInvitedPerson(personId); return true; }
   if (currentId && !confirm('You are already in a church in this app. Leave it and join the one in this invite?')) return false;
   const C = await import('./cloud.js');
   try {
     await C.joinChurch(cloudState.user, churchId);
     cloudState.churchId = '';
     await useChurch(churchId);
+    await claimInvitedPerson(personId);
     toast(`You joined ${state.settings.churchName}.`);
     return true;
   } catch (err) {
@@ -924,9 +1473,8 @@ async function acceptInvite(churchId, currentId = cloudState.churchId) {
 
 // An invite link (#join=<churchId>) is kept until you have signed in.
 function readInvite() {
-  const m = location.hash.match(/^#join=([A-Za-z0-9]{10,40})$/);
-  if (!m) return false;
-  session.set(m[1]);
+  if (!location.hash.startsWith('#join=') || !M.parseInvite(location.hash)) return false;
+  session.set(location.hash.slice('#join='.length));
   history.replaceState(null, '', location.pathname);
   return true;
 }
@@ -949,15 +1497,39 @@ function membersHtml(info) {
   if (!info) return '<li class="muted">Loading…</li>';
   const admin = info.members[me] === 'admin';
   return Object.entries(info.members).sort((a, b) => (a[1] === 'admin' ? -1 : 0) - (b[1] === 'admin' ? -1 : 0))
-    .map(([uid, role]) => `<li><span class="mono" aria-hidden="true">${esc(initials(info.memberNames[uid] || '?'))}</span>
+    .map(([uid, role]) => `<li>${avatar(info.memberNames[uid] || '?', info.memberPhotos?.[uid])}
       <span class="member-name">${esc(info.memberNames[uid] || 'Member')}${uid === me ? ' <span class="muted">(you)</span>' : ''}</span>
       <span class="member-role">${role === 'admin' ? 'Admin' : 'Editor'}</span>
       ${admin && uid !== me && role !== 'admin' ? `<button type="button" class="btn small" data-promote-member="${esc(uid)}">Make admin</button>` : ''}
       ${admin && uid !== me ? `<button type="button" class="btn small danger" data-remove-member="${esc(uid)}">Remove</button>` : ''}</li>`).join('');
 }
 
+// A photo becomes a small square JPEG (a phone photo is megabytes; this is a few KB).
+async function shrinkPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 160;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; // a transparent PNG would otherwise turn black
+    ctx.fillRect(0, 0, 160, 160);
+    ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 160, 160);
+    return canvas.toDataURL('image/jpeg', 0.75);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function openAccount() {
   const { user } = cloudState;
+  const myMinister = me();
+  const profile = { photo: isCloud() ? photoOf(myMinister) || cloudState.info?.memberPhotos?.[user?.uid] || '' : '' };
+  const profileName = myMinister?.name || cloudState.info?.memberNames?.[user?.uid] || user?.displayName || '';
+  const profileAvatar = () => avatar(profileName || '?', profile.photo);
   const head = dialogHead(isCloud() ? state.settings.churchName : 'Sync across devices',
     user ? `Signed in as ${user.email || user.displayName}` : '');
   let body;
@@ -986,7 +1558,7 @@ function openAccount() {
         <h3>Start your church online</h3>
         <p class="muted">${sample
           ? 'This browser still holds the sample church. Start empty, or upload the sample to try things out.'
-          : `Uploads what this browser has now (${state.services.length} services, ${state.people.length} ministers).`}
+          : `Uploads what this browser has now (${state.services.length} services, ${state.tasks.length} tasks, ${state.people.length} ministers).`}
           You become the admin and can invite your team.</p>
         <div class="row-actions">
           <button type="submit" class="btn primary" value="${sample ? 'upload-empty' : 'upload'}">${sample ? 'Start empty' : 'Put it online'}</button>
@@ -1004,6 +1576,21 @@ function openAccount() {
   } else {
     const admin = cloudState.info?.members?.[user.uid] === 'admin';
     body = `
+      <fieldset class="profile"><legend>Your profile</legend>
+        <div class="profile-row">
+          <span class="profile-avatar">${profileAvatar()}</span>
+          <div class="profile-fields">
+            <label>Your name <input name="profile-name" value="${esc(profileName)}" maxlength="60" autocomplete="name"></label>
+            <div class="row-actions">
+              <label class="btn small">Upload photo<input type="file" accept="image/*" id="profile-photo" hidden></label>
+              <button type="button" class="btn small ghost" data-local="remove-photo" ${profile.photo ? '' : 'hidden'}>Remove</button>
+              <span class="spacer"></span>
+              <button type="submit" class="btn small primary" value="profile">Save profile</button>
+            </div>
+          </div>
+        </div>
+        ${myMinister ? `<p class="hint">Also updates ${esc(myMinister.name)} on the roster.</p>` : ''}
+      </fieldset>
       <p class="lead">Every change is shared live with everyone in this church, and kept on this device for when you are offline.</p>
       <label>Invite link <span class="copy-row"><input id="invite-link" readonly value="${esc(inviteLink(cloudState.churchId))}"><button type="button" class="btn" data-local="copy-invite">Copy</button></span></label>
       <p class="muted small">Anyone with this link can join and edit the schedule. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
@@ -1023,6 +1610,24 @@ function openAccount() {
         if (ul) ul.innerHTML = membersHtml(fresh);
       }).catch(() => {});
       if (isCloud()) refresh();
+      const showPhoto = () => {
+        $('.profile-avatar', form).innerHTML = profileAvatar();
+        $('[data-local="remove-photo"]', form).hidden = !profile.photo;
+      };
+      $('#profile-photo', form)?.addEventListener('change', async e => {
+        const [file] = e.target.files;
+        e.target.value = ''; // so choosing the same picture again still counts
+        if (!file) return;
+        try {
+          const photo = await shrinkPhoto(file);
+          if (!M.isPhoto(photo)) throw new Error('too large');
+          profile.photo = photo;
+          showPhoto();
+        } catch { toast('That picture could not be read. Try a JPEG or PNG.', 'warn'); }
+      });
+      form.addEventListener('click', e => {
+        if (e.target.closest('[data-local="remove-photo"]')) { profile.photo = ''; showPhoto(); }
+      });
       form.addEventListener('click', async e => {
         if (e.target.closest('[data-local="copy-invite"]')) {
           const input = $('#invite-link', form);
@@ -1046,7 +1651,7 @@ function openAccount() {
     async onSubmit(form, action) {
       const C = await import('./cloud.js');
       // Enter in a field presses the hidden default button: treat it as the form's main action.
-      if (action === 'save') action = form.elements.email ? 'signin' : form.elements.invite?.value ? 'join' : 'none';
+      if (action === 'save') action = form.elements.email ? 'signin' : form.elements.invite?.value ? 'join' : form.elements['profile-name'] ? 'profile' : 'none';
       const error = msg => { const el = $('.form-error', form); if (el) el.textContent = msg; return true; };
       const busy = on => $$('button', form).forEach(b => { b.disabled = on; });
       const email = form.elements.email?.value.trim();
@@ -1054,6 +1659,21 @@ function openAccount() {
       try {
         busy(true);
         switch (action) {
+          case 'profile': {
+            const name = form.elements['profile-name'].value.trim();
+            if (!name) return error('Enter your name.');
+            const person = me();
+            if (person) await putDoc('people', { ...person, name, photo: profile.photo });
+            if (cloudState.info) {
+              cloudState.info.memberNames[user.uid] = name;
+              if (profile.photo) cloudState.info.memberPhotos[user.uid] = profile.photo;
+              else delete cloudState.info.memberPhotos[user.uid];
+            }
+            // Not waited for: with no signal the write is queued and sent on reconnecting.
+            C.saveProfile(cloudState.churchId, name, profile.photo).catch(err => toast(`Your profile was not saved online: ${err.message || err}`, 'warn'));
+            toast('Profile saved.');
+            return false;
+          }
           case 'google':
             cloudState.reopen = true;
             await C.signInGoogle();
@@ -1082,9 +1702,9 @@ function openAccount() {
             return true;
           }
           case 'join': {
-            const m = (form.elements.invite.value || '').match(/(?:#join=)?([A-Za-z0-9]{10,40})\s*$/);
-            if (!m) return error('Paste the whole invite link.');
-            await acceptInvite(m[1]);
+            const invite = (form.elements.invite.value || '').trim();
+            if (!M.parseInvite(invite)) return error('Paste the whole invite link.');
+            await acceptInvite(invite);
             return false;
           }
           case 'leave':
@@ -1116,13 +1736,18 @@ function openAccount() {
 const mine = { loaded: false, seen: new Set(), announced: new Set() };
 
 function me() {
-  if (!isCloud() || !cloudState.user?.email) return null;
-  return M.findPersonByEmail(state.people, cloudState.user.email);
+  if (!isCloud()) return null;
+  return M.findPersonForUser(state.people, cloudState.user);
 }
 
 function myUpcoming() {
   const person = me();
   return person ? M.upcomingFor(state, person.id, M.todayISO()) : [];
+}
+
+function myTasks() {
+  const person = me();
+  return person ? M.tasksFor(state, person.id, M.todayISO()) : [];
 }
 
 const isUnseen = item => item.keys.some(k => !mine.seen.has(k));
@@ -1150,7 +1775,7 @@ function renderMineButton() {
   if (!btn) return;
   btn.hidden = !isCloud();
   if (!isCloud()) return;
-  const fresh = mine.loaded ? myUpcoming().filter(isUnseen) : [];
+  const fresh = mine.loaded ? [...myUpcoming(), ...myTasks()].filter(isUnseen) : [];
   const count = $('.bell-count', btn);
   count.hidden = !fresh.length;
   count.textContent = fresh.length > 9 ? '9+' : String(fresh.length);
@@ -1163,7 +1788,7 @@ function renderMineButton() {
   unannounced.forEach(x => x.keys.forEach(k => mine.announced.add(k)));
   if (unannounced.length === 1) {
     const x = unannounced[0];
-    toast(`You're on ${x.roles.map(r => r.name).join(' and ')}, ${M.formatDate(x.service.date)}. Tap the bell to see it.`);
+    toast(x.task ? `You have a new task: ${x.task.title}. Tap the bell to see it.` : `You're on ${x.roles.map(r => r.name).join(' and ')}, ${M.formatDate(x.service.date)}. Tap the bell to see it.`);
   } else {
     toast(`You have ${unannounced.length} new assignments. Tap the bell to see them.`);
   }
@@ -1180,7 +1805,16 @@ async function openMine() {
       <p class="muted">Ask whoever runs the roster to open your profile on the Ministers tab and set its email to <strong>${esc(email)}</strong>. Then this bell tells you whenever you're put on a service.</p>`;
   } else {
     const list = myUpcoming();
-    body = list.length
+    const tasks = myTasks();
+    const taskList = tasks.length ? `<section class="sheet-section"><h3>Your tasks</h3><ul class="mine-list">${tasks.map(x => {
+      const d = dayParts(x.week);
+      return `<li class="${isUnseen(x) ? 'is-new' : ''}">
+          <span class="date-block"><span class="day-num">${d.num}</span><span class="day-dow">${esc(d.dow)} ${esc(d.mon)}</span></span>
+          <span class="mine-body"><span class="mine-roles">${esc(x.task.title)}</span>
+            ${x.task.notes ? `<span class="muted">${esc(x.task.notes)}</span>` : ''}</span>
+          ${isUnseen(x) ? '<span class="new-tag">New</span>' : ''}</li>`;
+    }).join('')}</ul></section>` : '';
+    body = (list.length
       ? `<ul class="mine-list">${list.map(x => {
         const d = dayParts(x.service.date);
         const sermon = x.service.sermon || {};
@@ -1191,9 +1825,9 @@ async function openMine() {
             ${x.service.setlist?.length ? `<span class="mine-songs">${esc(x.service.setlist.map(M.songLabel).join(' · '))}</span>` : ''}</span>
           ${isUnseen(x) ? '<span class="new-tag">New</span>' : ''}</li>`;
       }).join('')}</ul>`
-      : '<p class="muted">You are not on any upcoming service.</p>';
+      : tasks.length ? '' : '<p class="muted">You are not on any upcoming service.</p>') + taskList;
     // Opening the list counts as seeing it. Only upcoming keys are kept, so the doc stays small.
-    const keys = list.flatMap(x => x.keys);
+    const keys = [...list, ...tasks].flatMap(x => x.keys);
     if (mine.loaded && keys.some(k => !mine.seen.has(k))) {
       mine.seen = new Set(keys);
       renderMineButton();
@@ -1204,30 +1838,69 @@ async function openMine() {
     <footer class="dialog-actions"><span class="spacer"></span><button class="btn" value="cancel" formnovalidate>Close</button></footer>`);
 }
 
+// Opens the phone's share sheet, or copies on a computer.
+async function shareText(text, copied) {
+  if (navigator.share) {
+    try { await navigator.share({ text }); return; } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(text); toast(copied); } catch { toast(text); }
+}
+
+// After a minister is saved with "Send an invite": their link, ready to send.
+function openInvite(person) {
+  const text = M.inviteMessage(state, person, inviteLink(cloudState.churchId, person.id));
+  const phone = M.personPhone(person);
+  const email = M.personEmail(person);
+  openDialog(dialogHead('Send the invite', person.name) + `<div class="dialog-body"><p class="invite-preview">${esc(text)}</p></div>
+    <footer class="dialog-actions">
+      ${phone ? `<a class="btn ghost" href="sms:${esc(phone)}?&body=${esc(encodeURIComponent(text))}">Text</a>` : ''}
+      ${email ? `<a class="btn ghost" href="mailto:${esc(email)}?subject=${esc(encodeURIComponent(`Join ${state.settings.churchName}`))}&body=${esc(encodeURIComponent(text))}">Email</a>` : ''}
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Done</button>
+      <button type="button" class="btn primary" data-local="send-invite">${navigator.share ? 'Send' : 'Copy'}</button>
+    </footer>`, {
+    onMount(form) { $('[data-local="send-invite"]', form).addEventListener('click', () => shareText(text, 'Invite copied. Paste it into a chat.')); },
+  });
+}
+
 // After a save puts people on a service: one tap each to message them.
 function openNotify(service, added) {
-  // Signed out, the app only holds this browser's copy, so a link would show them nothing.
-  const link = isCloud() ? `${location.origin}${location.pathname}` : '';
-  const rows = [...added].map(([pid, roleIds]) => ({ person: state.people.find(p => p.id === pid), roleIds }))
-    .filter(r => r.person);
+  const link = notifyLink();
+  const rows = [...added].map(([pid, roleIds]) => ({ person: state.people.find(p => p.id === pid), roleIds })).filter(r => r.person).map(({ person, roleIds }) => {
+    const detail = roleIds.map(id => state.roles.find(x => x.id === id)?.name || id).join(', ');
+    return { person, detail, text: M.assignmentMessage(state, person, service, roleIds, link), subject: `Serving ${M.formatDate(service.date)}: ${detail}` };
+  });
+  showNotify(`${rows.length} newly on ${M.formatDate(service.date, { weekday: 'long', day: 'numeric', month: 'long' })}`, rows);
+}
+
+// After a save gives people a task: the same one tap each.
+function openTaskNotify(task, added) {
+  const link = notifyLink();
+  const when = M.formatDate(M.weekOfDate(task.week, state.settings.defaultDay), { day: 'numeric', month: 'short' });
+  const rows = added.map(id => state.people.find(p => p.id === id)).filter(Boolean)
+    .map(person => ({ person, detail: `Week ending ${when}`, text: M.taskMessage(state, person, task, link), subject: `Task for ${when}: ${task.title}` }));
+  showNotify(task.title, rows);
+}
+
+// Signed out, the app only holds this browser's copy, so a link would show them nothing.
+const notifyLink = () => (isCloud() ? `${location.origin}${location.pathname}` : '');
+
+function showNotify(sub, rows) {
   if (!rows.length) return;
   const items = rows.map((r, i) => {
-    const text = M.assignmentMessage(state, r.person, service, r.roleIds, link);
     const phone = M.personPhone(r.person);
     const email = M.personEmail(r.person);
-    const subject = `Serving ${M.formatDate(service.date)}: ${r.roleIds.map(id => state.roles.find(x => x.id === id)?.name || id).join(', ')}`;
     return `<li>
-      <span class="mono" aria-hidden="true">${esc(initials(r.person.name))}</span>
+      ${avatar(r.person.name, photoOf(r.person))}
       <span class="notify-who"><span class="member-name">${esc(r.person.name)}</span>
-        <span class="muted small">${esc(r.roleIds.map(id => state.roles.find(x => x.id === id)?.name || id).join(', '))}</span></span>
+        <span class="muted small">${esc(r.detail)}</span></span>
       <span class="notify-actions">
         <button type="button" class="btn small" data-notify="${i}">${navigator.share ? 'Send' : 'Copy'}</button>
-        ${phone ? `<a class="btn small ghost" href="sms:${esc(phone)}?&body=${esc(encodeURIComponent(text))}">Text</a>` : ''}
-        ${email ? `<a class="btn small ghost" href="mailto:${esc(email)}?subject=${esc(encodeURIComponent(subject))}&body=${esc(encodeURIComponent(text))}">Email</a>` : ''}
+        ${phone ? `<a class="btn small ghost" href="sms:${esc(phone)}?&body=${esc(encodeURIComponent(r.text))}">Text</a>` : ''}
+        ${email ? `<a class="btn small ghost" href="mailto:${esc(email)}?subject=${esc(encodeURIComponent(r.subject))}&body=${esc(encodeURIComponent(r.text))}">Email</a>` : ''}
       </span></li>`;
   }).join('');
-  const texts = rows.map(r => M.assignmentMessage(state, r.person, service, r.roleIds, link));
-  openDialog(dialogHead('Let them know', `${rows.length} newly on ${M.formatDate(service.date, { weekday: 'long', day: 'numeric', month: 'long' })}`) + `<div class="dialog-body">
+  openDialog(dialogHead('Let them know', sub) + `<div class="dialog-body">
       <ul class="members notify-list">${items}</ul>
       <p class="muted small">${navigator.share
         ? 'Send opens Messenger, Viber or any app on your phone with the message written for you.'
@@ -1238,11 +1911,7 @@ function openNotify(service, added) {
       form.addEventListener('click', async e => {
         const i = e.target.closest('[data-notify]')?.dataset.notify;
         if (i === undefined) return;
-        const text = texts[Number(i)];
-        if (navigator.share) {
-          try { await navigator.share({ text }); return; } catch (err) { if (err.name === 'AbortError') return; }
-        }
-        try { await navigator.clipboard.writeText(text); toast('Message copied. Paste it into a chat.'); } catch { toast(text); }
+        await shareText(rows[Number(i)].text, 'Message copied. Paste it into a chat.');
       });
     },
   });
@@ -1287,18 +1956,34 @@ async function handleAction(el) {
       toast(created.length ? `Added ${created.length} service${created.length > 1 ? 's' : ''}.` : 'Every one of those days already has a service.');
       return render();
     }
+    case 'assign': return openAssign(id, el.dataset.role, Number(el.dataset.slot));
+    case 'pick-day': view.day = id; render(); return $('.main').scrollTo(0, 0);
+    case 'print': return window.print();
+    case 'autofill-month': {
+      const { changed, filled } = M.autoFillMonth(state, view.y, view.m, M.todayISO());
+      if (!changed.length) return toast('No upcoming slots could be filled. Any still open need someone qualified and free that day.');
+      if (!confirm(`Fill ${plural(filled, 'open slot')} across ${plural(changed.length, 'service')}${isCloud() ? ' for everyone in this church' : ''}?`)) return undefined;
+      for (const s of changed) await putDoc('services', s);
+      toast(`Filled ${plural(filled, 'open slot')}, starting with whoever has served least.`);
+      return render();
+    }
     case 'edit-person': return openPersonEditor(state.people.find(p => p.id === id));
     case 'new-person': return openPersonEditor(null);
     case 'edit-series': return openSeriesEditor(state.series.find(s => s.id === id));
     case 'new-series': return openSeriesEditor(null);
-    case 'add-role': return $('#role-rows').insertAdjacentHTML('beforeend', newRoleRow());
+    case 'edit-task': return openTaskEditor(state.tasks.find(t => t.id === id));
+    case 'new-task': return openTaskEditor(null, el.dataset.week);
+    case 'add-role': return addRole();
     case 'delete-role': {
       const row = el.closest('.role-row');
       const used = state.services.some(s => M.assigned(s, row.dataset.role).length);
-      if (!row.dataset.new && used && !confirm('Remove this role? Its assignments on every service will be cleared when you save.')) return;
-      return row.remove();
+      if (used && !confirm('Remove this role? Its assignments on every service will be cleared.')) return;
+      if (!row.dataset.new) removedRoles.add(row.dataset.role);
+      row.remove();
+      return saveRoles();
     }
     case 'theme': applyTheme(el.dataset.value); return render();
+    case 'schedule-mode': view.announce = el.dataset.value === 'announce'; return render();
     case 'export': return exportBackup();
     case 'copy-roster': {
       const text = M.rosterText(state, view.y, view.m);
@@ -1319,7 +2004,7 @@ async function handleAction(el) {
       toast('Sample data loaded.');
       return render();
     case 'clear-all':
-      if (!confirm(`Delete every service, minister and series${isCloud() ? ' for everyone in this church' : ''}? This cannot be undone.`)) return;
+      if (!confirm(`Delete every service, task, minister and series${isCloud() ? ' for everyone in this church' : ''}? This cannot be undone.`)) return;
       await replaceAll({ ...M.emptyState(), settings: { ...state.settings, seeded: true }, roles: state.roles });
       view.focus = '';
       toast('Everything cleared.');
@@ -1339,31 +2024,40 @@ function wire() {
     if (!el || el.tagName === 'SELECT' || dialog().contains(el)) return;
     handleAction(el);
   });
+  // Nothing on a phone can be dragged away: a touch only scrolls the open sheet, or else the
+  // page, and only if there is more to see. Above phone width the window scrolls as usual.
+  const hasMore = el => Boolean(el) && el.scrollHeight > el.clientHeight;
+  document.addEventListener('touchmove', e => {
+    const open = dialog().open;
+    if (!e.cancelable || (!open && !phoneWidth.matches)) return;
+    if (!hasMore(e.target.closest(open ? '.dialog-body' : '.main')) && !hasMore(e.target.closest('textarea'))) e.preventDefault();
+  }, { passive: false });
+  phoneWidth.addEventListener('change', () => { if (!dialog().open) render(); });
   document.addEventListener('keydown', e => {
-    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-action]')) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-action], .folio[data-action]')) {
       e.preventDefault();
       handleAction(e.target);
     }
   });
   document.addEventListener('change', e => {
     if (e.target.matches('select[data-action="focus"]')) { view.focus = e.target.value; render(); }
+    if (e.target.matches('input[data-task-done]')) setTaskDone(e.target.dataset.taskDone, e.target.checked);
     if (e.target.id === 'import-file' && e.target.files[0]) importBackup(e.target.files[0]);
+    if (e.target.closest('#settings-form')) saveChurch(e.target.form);
+    if (/^role-(name|slots)$/.test(e.target.name)) saveRoles();
+    if (e.target.id === 'minister-role') { view.roleFilter = e.target.value; applyMinisterFilter(); }
   });
-  document.addEventListener('submit', async e => {
-    if (e.target.id === 'settings-form') {
-      e.preventDefault();
-      const f = e.target.elements;
-      state.settings = { ...state.settings, churchName: f.churchName.value.trim() || 'Our Church', defaultDay: Number(f.defaultDay.value), defaultTime: f.defaultTime.value, serviceName: f.serviceName.value.trim() || 'Service' };
-      afterWrite(await store.putSettings(state.settings));
-      toast('Settings saved.');
-      render();
-    }
-    if (e.target.id === 'roles-form') {
-      e.preventDefault();
-      await saveRoles(e.target);
-      render();
-    }
+  document.addEventListener('input', e => {
+    if (e.target.id === 'minister-search') { view.search = e.target.value; applyMinisterFilter(); }
   });
+  // Both settings forms save as you go, so Enter has nothing left to submit.
+  document.addEventListener('submit', e => {
+    if (e.target.closest('.main')) e.preventDefault();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.target.id === 'new-role' && e.key === 'Enter') { e.preventDefault(); addRole(); }
+  });
+  wireRoleDrag();
   // Back online after the seen list failed to load: load it so the bell starts counting.
   window.addEventListener('online', async () => {
     if (isCloud() && !mine.loaded) { await loadSeen(); if (!dialog().open) render(); }
@@ -1385,7 +2079,7 @@ async function init() {
   const invited = readInvite();
   readHash();
   wire();
-  unsubscribe = store.subscribe(next => { state = next; if (!dialog().open) render(); });
+  unsubscribe = store.subscribe(next => { state = next; if (!dialog().open && !isTyping()) render(); });
   render();
   await initCloud();
   if (invited && !cloudState.ready) toast('Cloud sync is not switched on here, so the invite cannot be used yet.', 'warn');

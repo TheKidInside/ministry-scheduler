@@ -57,11 +57,12 @@ state
  ├─ roles      [{ id:'preacher', name:'Preacher', slots:1 }, ...]   ← the schedule columns
  ├─ people     [{ id, name, contact (phone), email, roleIds:[...], unavailable:['2026-11-15'] }]
  ├─ series     [{ id, name, color, start, end, description }]
- └─ services   [{ id, date:'2026-11-15', time, name,
+ ├─ services   [{ id, date:'2026-11-15', time, name,
                   assignments: { 'worship-team': ['p1','p3'], preacher: ['p10'] },
                   sermon: { title, scripture, seriesId },
                   setlist: [{ title:'Amazing Grace', key:'G' }, ...],
                   notes }]
+ └─ tasks      [{ id, week:'2026-11-15', title, assignees:['p1'], notes, done }]
 ```
 
 A **service** is one gathering. `assignments` maps a role to the people on it. The
@@ -135,6 +136,8 @@ dialog open (for example when the series end date is before its start).
 - **Setlist**: `SONG_KEYS` (the key dropdown), `songLabel` ("Amazing Grace (G)"), and `songLibrary`, every song sung so far with the key it was last sung in. The library feeds the title suggestions and fills in the key when you pick a song you've sung before.
 - **Letting people know**: `addedAssignments(before, after)` finds who a save put on a service (moving the date counts everyone as new). `assignmentMessage` writes the text sent to them. `findPersonByEmail` links a sign-in to a minister (it also reads an email left in the old "Phone or email" field). `upcomingFor` gives your upcoming assignments, each with keys like `svc_x:tech:2026-11-15`, which is how the bell remembers what you've seen.
 
+- **Weekly tasks**: a week is named by its service day, because the work is getting ready for that gathering. `weeksInMonth` lists a month's weeks, `tasksInWeek` fills one, and `weekOfDate` snaps a stored date to the nearest usual service day, so changing that day in Settings moves each task at most three days rather than losing it. `tasksFor` feeds the bell, and `addedTaskPeople` and `taskMessage` do for tasks what `addedAssignments` and `assignmentMessage` do for services.
+
 ### 3.2 [js/store.js](../js/store.js) — the socket
 
 `LocalStore` keeps the full state under one localStorage key. Its methods are
@@ -154,17 +157,46 @@ three months) so the screens explain themselves. It sets `settings.seeded`, so
 
 | Tab | Function | What it shows |
 |---|---|---|
-| Schedule | `renderSchedule` | services × roles table, open slots, conflict flags, "Highlight" one minister |
-| Preaching | `renderPreaching` | the series arc (a coloured ribbon spans each series' Sundays, with a sermon folio under each) and the preaching plan table |
-| Ministers | `renderMinisters` | each person, their roles, services this month, next assignment, away dates |
-| Series | `renderSeries` | each series with dates, colour and its numbered sermon list |
-| Settings | `renderSettings` | church name, usual day/time, roles, theme, backup/import |
+| Schedule | `renderSchedule`, `renderDay` | desktop: the month's numbers, a clash alert and the services × roles table. Phone: `renderDay` shows one service at a time, roles grouped by `M.roleGroups`. The Manage / Announcement toggle swaps in `renderAnnouncement` |
+| Preaching | `renderPreaching` | a ribbon spanning each series' Sundays, then a card per sermon |
+| Tasks | `renderTasks` | a card per week of the month: who has each task, a tick box, progress, and "This week" marked in gold |
+| Ministers | `renderMinisters` | searchable directory sorted by role: away dates as ranges, a dot per service this month, next assignment. Filtering hides rows (`applyMinisterFilter`), so the search box is never redrawn under your fingers |
+| Series | `renderSeries` | a six-month timeline (`M.seriesTimeline`) and a card per series, with Current / Up next / Planned / Draft / Finished worked out from its dates (`M.seriesStatuses`) |
+| Settings | `renderSettings` | church name, usual day/time, roles (drag to reorder), theme, backup/import. Everything saves as you go |
 
-Editors: `openServiceEditor`, `openPersonEditor`, `openSeriesEditor`. The service
+**Assigning one place.** An amber Assign button (or any row on the phone) opens `openAssign`, a single-purpose sheet. `M.assignOptions` sorts the team into who can take it, least busy first, and who can't and why. Think of a substitute list rather than the whole staff file: the full service editor is still there for overrides, such as putting on someone not set up for the role.
+
+**Roles save one document at a time.** `writeRoles` writes only what changed instead of `replaceAll`, which rewrites the whole church. Another editor's change can arrive while these rows are on screen, so absence proves nothing: a role only counts as deleted if its X was pressed here (`removedRoles`), and only a row added here can create one. Without that, renaming a role could silently delete one a colleague had just added.
+
+Editors: `openServiceEditor`, `openPersonEditor`, `openSeriesEditor`, `openTaskEditor`. The service
 editor recomputes conflicts on every change, so the warning box updates while you
 pick people. In each role dropdown, people who can serve are listed first, with
 "(away)" and "(2× this month)" hints. Its **Setlist** section has a row per song
 (title, key, move up, remove); the rows are read back in order by `readServiceForm`.
+
+**Your profile.** Signed in to a church, the account sheet edits your name and photo. Saving updates
+`memberNames`/`memberPhotos` on the church (the rules allow only your own entry) and, if you are on the
+roster, your minister's `name` and `photo`, which sync live. `shrinkPhoto` turns any picture into a
+160px JPEG of a few KB stored as text on the document, like a passport photo stapled to the form
+rather than a file kept in a separate cabinet: Firebase Storage needs a paid plan.
+
+**Nothing gets dragged away.** On a phone every editor is a bottom sheet. The frame (`dialog`)
+cannot scroll or slide, and a `touchmove` listener in `wire()` cancels any drag that isn't scrolling
+`.dialog-body`, `.main` or a long textarea, on every page and sheet. Think of a clipboard held still
+while only the page under the clip moves.
+
+**How a minister signs in.** With no email, the minister editor offers three choices. *Send an
+invite* saves them, then `openInvite` writes a link ending `#join=<church>&as=<minister>`;
+`claimInvitedPerson` links whoever accepts it. *Registered user* lists this church's members and
+stores their uid as `person.userId`. *Leave blank* does nothing. `M.findPersonForUser` decides who
+"you" are: the `userId` link first, then the sign-in email. Firestore only records member names, not
+emails, and a browser can't list every Firebase account, so "registered" means members of this church.
+
+**Announcement view, for screenshots.** `renderAnnouncement` draws the month as one card that
+carries its own church name and month, so a snip makes sense on its own in a group chat. It turns
+the working table sideways: dates across, roles down. A phone screen can take many rows but few
+columns, like a noticeboard that can grow downward but not past the wall. `M.announcementBlocks`
+builds the data and splits a month of more than 5 services into several even tables. 
 
 **Notifications, with no server.** Two halves:
 1. *The person assigning.* When a save puts someone new on a service, `openNotify` opens "Let them know": one row per person with **Send** (the phone's share sheet, so Messenger, Viber, SMS and the rest), **Text** (when the profile has a phone) and **Email** (when it has an email). On a computer, Send becomes **Copy**.
@@ -172,21 +204,26 @@ pick people. In each role dropdown, people who can serve are listed first, with
 
 Neither half can reach a phone while the app is closed. That needs a server (see Part 6).
 
-The URL hash holds the tab and month (`#/preaching/2026-11`), so a link or
-bookmark opens the same view.
+**Weekly tasks.** Think of a parish noticeboard with one column per Sunday: each job is pinned under the Sunday it serves. A task can go to several people. Saving one that gives someone new a task opens the same "Let them know" sheet as a service (`showNotify`), and it appears in their bell, with a key like `task:<id>:2026-11-15`, until it is ticked off. Tasks live in their own Firestore collection, so ticking one never rewrites a whole service.
+
+The URL hash holds the tab and month (`#/preaching/2026-11`), plus `/announce` on the
+Schedule's announcement view, so a link or bookmark opens the same view.
 
 ### 3.5 [css/styles.css](../css/styles.css)
 
-The look is called "Vestry": a deep ink rail with gold hairlines, cool porcelain pages,
-Cormorant Garamond for headings and dates, Hanken Grotesk for working text. Series
-colours are jewel tones (`SERIES_COLORS` in model.js), the only saturated colour on the page.
-Colour tokens live on `:root`, with a dark set under `prefers-color-scheme` and a
-`[data-theme]` override for the System/Light/Dark switch. Each series colour is passed
-as a CSS variable (`style="--series:#6b4c9a"`), so one rule colours ribbons, covers,
-numerals and diamonds. The arc is a CSS grid with explicit `grid-column` placement;
-under 760px it switches to `display:block`, so the same DOM order (ribbon, its sermons,
-next ribbon...) reads top to bottom. On phones the rail becomes a bottom tab bar and
-editors open as bottom sheets; on desktop they slide in from the right.
+The look is chapel navy, candle gold and linen, with Source Serif 4 for titles and Inter for the
+working text. Colour carries a fixed meaning, like the lights on a dashboard: amber is always
+"someone is needed", red is always "something clashes", and series colours are the only other
+hue on the page. Tokens live on `:root`, with a dark set under `prefers-color-scheme` and a
+`[data-theme]` override for the Light / Dark / Match device cards. Each series colour is passed
+as a CSS variable (`style="--series:#6b4c9a"`); one rule tints ribbons, badges, stripes and
+timeline bars with `color-mix`.
+
+At 760px and under, the same app becomes a phone app rather than a squeezed page. The rail's
+tabs turn into a white bottom bar. The header (`.page-head`) goes navy and sticks to the top of
+`.main`, carrying whatever you navigate with: date pills on Schedule, series bars on Preaching,
+search on Ministers (`phoneHeads` in app.js). Editors open as bottom sheets, and picking a
+person takes the full screen. On a desktop they slide in from the right.
 
 ---
 
@@ -196,7 +233,7 @@ editors open as bottom sheets; on desktop they slide in from the right.
 2. The editor clones the service (`structuredClone`), so typing doesn't change the real data until you save.
 3. You type a title and press **Save** → `openDialog`'s submit handler validates → `onSubmit` → `readServiceForm` builds the new service object from the inputs.
 4. `putDoc('services', next)` replaces it in `state` **and** calls `store.putDoc`, which writes localStorage.
-5. The dialog closes, `render()` redraws, and the Preaching arc shows the new title under its series ribbon.
+5. The dialog closes, `render()` redraws, and the sermon's card on Preaching shows the new title.
 
 ---
 
@@ -205,6 +242,7 @@ editors open as bottom sheets; on desktop they slide in from the right.
 - **Add a default role**: add it to `DEFAULT_ROLES` in `model.js` (new churches only). Existing data: Settings → Roles → Add a role.
 - **Change service day** (e.g. Saturday night): Settings → Usual service day. "Add every …" follows it.
 - **New series colours**: edit `SERIES_COLORS` in `model.js`.
+- **New collection** (like `tasks`): add it to `COLLECTIONS`, `emptyState` and `normalizeState`, and to the list in `firestore.rules`. Deploy the rules before the code, see [FIREBASE.md](FIREBASE.md).
 - **New field on a service** (e.g. "Communion Sunday"): add it to `newService`, `normalizeState`, `serviceFormBody` and `readServiceForm`, then show it in a render function.
 
 ---

@@ -20,14 +20,25 @@ service cloud.firestore {
         && request.resource.data.members[request.auth.uid] == 'admin';
       // Members edit the settings; only an admin changes who is a member.
       allow update: if (isMember(churchId)
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['members', 'memberNames', 'removed', 'createdAt']))
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['members', 'memberNames', 'memberPhotos', 'removed', 'createdAt']))
         || isAdmin(churchId)
         // Leaving: a member may take themselves (and only themselves) off the list.
         || (isMember(churchId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberNames'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberNames', 'memberPhotos'])
           && request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly([request.auth.uid])
           && request.resource.data.memberNames.diff(resource.data.memberNames).affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.get('memberPhotos', {}).diff(resource.data.get('memberPhotos', {})).affectedKeys().hasOnly([request.auth.uid])
           && !(request.auth.uid in request.resource.data.members))
+        // Your profile: a member may change their own name and photo, and nobody else's.
+        || (isMember(churchId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberNames', 'memberPhotos'])
+          && request.resource.data.memberNames.diff(resource.data.memberNames).affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.get('memberPhotos', {}).diff(resource.data.get('memberPhotos', {})).affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.memberNames[request.auth.uid] is string
+          && request.resource.data.get('memberPhotos', {}).get(request.auth.uid, '') is string
+          && request.resource.data.memberNames[request.auth.uid].size() > 0
+          && request.resource.data.memberNames[request.auth.uid].size() <= 60
+          && request.resource.data.get('memberPhotos', {}).get(request.auth.uid, '').size() <= 40000)
         // Joining by invite link: you may add yourself (and only yourself) as an editor,
         // unless an admin removed you.
         || (signedIn()
@@ -40,7 +51,7 @@ service cloud.firestore {
       allow delete: if isAdmin(churchId);
 
       match /{collection}/{docId} {
-        allow read, write: if collection in ['roles', 'people', 'series', 'services'] && isMember(churchId);
+        allow read, write: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isMember(churchId);
       }
     }
   }

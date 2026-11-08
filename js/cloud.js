@@ -4,11 +4,11 @@
 //
 // Firestore layout (rules in firestore.rules):
 //   users/{uid}                          { churchId, seen[] }
-//   churches/{churchId}                  { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name} }
-//   churches/{churchId}/{roles|people|series|services}/{docId}
+//   churches/{churchId}                  { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name}, memberPhotos: {uid: jpeg} }
+//   churches/{churchId}/{roles|people|series|services|tasks}/{docId}
 
 import { firebaseConfig } from './firebase-config.js';
-import { normalizeState } from './model.js';
+import { normalizeState, isPhoto } from './model.js';
 import { COLLECTIONS } from './store.js';
 
 const V = '10.12.2';
@@ -168,6 +168,7 @@ export async function leaveChurch(uid, churchId = '') {
     await F.updateDoc(F.doc(db, 'churches', churchId), {
       [`members.${uid}`]: F.deleteField(),
       [`memberNames.${uid}`]: F.deleteField(),
+      [`memberPhotos.${uid}`]: F.deleteField(),
     });
   }
   await F.setDoc(F.doc(db, 'users', uid), { churchId: '' }, { merge: true });
@@ -178,7 +179,19 @@ export async function churchInfo(churchId) {
   const snap = await F.getDoc(F.doc(db, 'churches', churchId));
   if (!snap.exists()) return null;
   const d = snap.data();
-  return { id: churchId, name: d.name, members: d.members || {}, memberNames: d.memberNames || {} };
+  const memberPhotos = Object.fromEntries(Object.entries(d.memberPhotos || {}).filter(([, v]) => isPhoto(v)));
+  return { id: churchId, name: d.name, members: d.members || {}, memberNames: d.memberNames || {}, memberPhotos };
+}
+
+// Your own name and photo, as this church lists you. Rejects if the rules refuse it.
+export async function saveProfile(churchId, name, photo) {
+  const { auth, db, A, F } = await cloud();
+  const { uid } = auth.currentUser;
+  await F.updateDoc(F.doc(db, 'churches', churchId), {
+    [`memberNames.${uid}`]: name,
+    [`memberPhotos.${uid}`]: photo || F.deleteField(),
+  });
+  await A.updateProfile(auth.currentUser, { displayName: name }).catch(() => {}); // only used when joining another church
 }
 
 // Admin only (enforced by the rules). A removed person is also listed in `removed`,
@@ -188,6 +201,7 @@ export async function removeMember(churchId, uid) {
   await F.updateDoc(F.doc(db, 'churches', churchId), {
     [`members.${uid}`]: F.deleteField(),
     [`memberNames.${uid}`]: F.deleteField(),
+    [`memberPhotos.${uid}`]: F.deleteField(),
     [`removed.${uid}`]: true,
   });
 }

@@ -22,6 +22,72 @@ test('month grid starts on the right weekday and covers every day', () => {
   assert.equal(M.monthGrid(2027, 2)[0].indexOf('2027-02-01'), 1); // Monday
 });
 
+test('announcementBlocks: a column per service, a row per role, names only', () => {
+  const s = base();
+  s.services = [
+    { ...M.newService({ date: '2026-11-08' }), assignments: { 'worship-team': ['a', 'b'], preacher: ['gone', 'c'] } },
+    M.newService({ date: '2026-11-01' }),
+    M.newService({ date: '2026-12-06' }),
+  ];
+  const [block, ...rest] = M.announcementBlocks(s, 2026, 11);
+  assert.equal(rest.length, 0);
+  assert.deepEqual(block.services.map(x => x.date), ['2026-11-01', '2026-11-08']);
+  assert.deepEqual(block.rows.map(r => r.role.id), s.roles.map(r => r.id));
+  const row = id => block.rows.find(r => r.role.id === id).cells;
+  assert.deepEqual(row('worship-team'), [[], ['Ana', 'Ben']]);
+  assert.deepEqual(row('preacher'), [[], ['Cy']], 'a removed person is not announced');
+  assert.deepEqual(M.announcementBlocks(s, 2027, 1), [], 'an empty month has nothing to announce');
+});
+
+test('announcementBlocks keeps tables phone-sized by splitting busy months evenly', () => {
+  const sizes = n => {
+    const s = base();
+    s.services = Array.from({ length: n }, (_, i) => M.newService({ date: M.toISO(2026, 11, i + 1) }));
+    return M.announcementBlocks(s, 2026, 11).map(b => b.services.length);
+  };
+  assert.deepEqual(sizes(4), [4]);
+  assert.deepEqual(sizes(5), [5]);
+  assert.deepEqual(sizes(6), [3, 3]);
+  assert.deepEqual(sizes(7), [4, 3]);
+  assert.deepEqual(sizes(11), [4, 4, 3]);
+  const s = base();
+  s.services = Array.from({ length: 5 }, (_, i) => M.newService({ date: M.toISO(2026, 11, i + 1) }));
+  assert.deepEqual(M.announcementBlocks(s, 2026, 11, 4).map(b => b.services.length), [3, 2], 'a phone takes 4 at most');
+});
+
+test('findPersonForUser prefers a direct link, then the sign-in email', () => {
+  const people = [{ id: 'x', name: 'X', email: 'me@a.co' }, { id: 'y', name: 'Y', email: '', userId: 'u1' }];
+  assert.equal(M.findPersonForUser(people, { uid: 'u1', email: 'me@a.co' }).id, 'y');
+  assert.equal(M.findPersonForUser(people, { uid: 'u2', email: 'ME@a.co' }).id, 'x');
+  assert.equal(M.findPersonForUser(people, { uid: 'u3', email: '' }), null);
+  assert.equal(M.findPersonForUser(people, null), null);
+});
+
+test('parseInvite reads links and bare ids, with or without a minister', () => {
+  const id = 'AbCdEfGhIj123';
+  assert.deepEqual(M.parseInvite(id), { churchId: id, personId: '' });
+  assert.deepEqual(M.parseInvite(` https://x.app/#join=${id} `), { churchId: id, personId: '' });
+  assert.deepEqual(M.parseInvite(`https://x.app/#join=${id}&as=p_m3x9`), { churchId: id, personId: 'p_m3x9' });
+  assert.equal(M.parseInvite('short'), null);
+  assert.equal(M.parseInvite(`#join=${id}&as=p1&x=yyyyyyyyyyyy`), null);
+  assert.equal(M.parseInvite(''), null);
+});
+
+test('normalizeState keeps a minister\'s account link', () => {
+  const out = M.normalizeState({ people: [{ id: 'a', name: 'A', userId: 'u1' }, { id: 'b', name: 'B' }] });
+  assert.deepEqual(out.people.map(p => p.userId), ['u1', '']);
+});
+
+test('only small JPEG profile photos are kept', () => {
+  const ok = 'data:image/jpeg;base64,AAAA';
+  assert.ok(M.isPhoto(ok));
+  assert.ok(!M.isPhoto('https://evil.example/pixel.gif'));
+  assert.ok(!M.isPhoto('data:image/svg+xml;base64,AAAA'));
+  assert.ok(!M.isPhoto(`data:image/jpeg;base64,${'A'.repeat(40000)}`));
+  const out = M.normalizeState({ people: [{ id: 'a', name: 'A', photo: ok }, { id: 'b', name: 'B', photo: 'javascript:1' }] });
+  assert.deepEqual(out.people.map(p => p.photo), [ok, '']);
+});
+
 test('shiftMonth wraps years both ways', () => {
   assert.deepEqual(M.shiftMonth(2026, 12, 1), { y: 2027, m: 1 });
   assert.deepEqual(M.shiftMonth(2026, 1, -1), { y: 2025, m: 12 });
@@ -200,4 +266,168 @@ test('setlists are cleaned on load, remembered as a library, and printed in the 
   assert.deepEqual(lib.map(x => [x.title, x.key, x.times]), [['amazing grace', 'A', 2], ['Be Thou My Vision', '', 1]]);
   assert.match(M.rosterText(s, 2026, 11), /Setlist: Amazing Grace \(G\), Be Thou My Vision/);
   assert.deepEqual(M.newService({ date: '2026-11-01' }).setlist, []);
+});
+
+test('a week runs up to the usual service day, and a month has one per service day', () => {
+  assert.deepEqual(M.weeksInMonth(2026, 11, 0).map(w => w.end), ['2026-11-01', '2026-11-08', '2026-11-15', '2026-11-22', '2026-11-29']);
+  assert.equal(M.weeksInMonth(2026, 11, 0)[0].start, '2026-10-26', 'a week can start in the month before');
+  assert.equal(M.weekOfDate('2026-11-15', 0), '2026-11-15');
+  assert.equal(M.weekOfDate('2026-11-15', 6), '2026-11-14', 'changing the usual day moves a task to the nearest one');
+  assert.equal(M.addDays('2026-12-31', 1), '2027-01-01');
+});
+
+test('tasks are cleaned on load, and kept in the order they were added', () => {
+  const s = M.normalizeState({ tasks: [
+    { id: 't2', week: '2026-11-15', title: ' Later ', assignees: ['a', 'a', null], done: 'yes' },
+    { id: 't1', week: '2026-11-15', title: 'First', assignees: 'a', notes: 5, done: true },
+    { id: 't3', week: 'nope', title: 'Bad week' }, { id: 't4', week: '2026-11-15', title: '  ' }, null,
+  ] });
+  assert.deepEqual(s.tasks.map(t => t.id), ['t2', 't1']);
+  assert.deepEqual(s.tasks[0], { id: 't2', week: '2026-11-15', title: 'Later', assignees: ['a'], notes: '', done: false });
+  assert.deepEqual(s.tasks[1].assignees, []);
+  assert.deepEqual(M.tasksInWeek(s.tasks, '2026-11-15').map(t => t.id), ['t1', 't2']);
+  assert.deepEqual(M.normalizeState({}).tasks, [], 'an older backup has no tasks');
+});
+
+test('a person sees their unfinished tasks from this week on, and only new people are told', () => {
+  const s = base();
+  const t = id => ({ id, week: '2026-11-15', title: id, assignees: ['b'], notes: '', done: false });
+  s.tasks = [t('open'), { ...t('finished'), done: true }, { ...t('past'), week: '2026-11-08' }, { ...t('other'), assignees: ['a'] }];
+  const mine = M.tasksFor(s, 'b', '2026-11-10');
+  assert.deepEqual(mine.map(x => x.task.id), ['open']);
+  assert.deepEqual(mine[0].keys, ['task:open:2026-11-15']);
+  assert.equal(M.tasksFor(s, 'b', '2026-11-15').length, 1, 'still due on the service day itself');
+  const before = t('x');
+  assert.deepEqual(M.addedTaskPeople(null, before), ['b']);
+  assert.deepEqual(M.addedTaskPeople(before, { ...before, assignees: ['b', 'c'] }), ['c']);
+  assert.deepEqual(M.addedTaskPeople(before, { ...before, week: '2026-11-22' }), ['b'], 'a new week is news');
+  const msg = M.taskMessage(s, { name: 'Ben Cruz' }, { ...before, title: 'Print it', notes: 'A4 please' }, 'https://x.test/');
+  assert.match(msg, /^Hi Ben, you have a task for the week of Sunday 15 November: Print it\.\nA4 please\n/);
+});
+
+test('deleting a person takes them off tasks and leaves other tasks untouched', () => {
+  const kept = { id: 'k', week: '2026-11-15', title: 'k', assignees: ['a'], notes: '', done: false };
+  const after = M.removePersonFromTasks([kept, { ...kept, id: 'c', assignees: ['a', 'b'] }], 'b');
+  assert.equal(after[0], kept);
+  assert.deepEqual(after[1].assignees, ['a']);
+});
+
+test('the sample church has weekly tasks that survive normalizing', () => {
+  const s = sampleState(new Date(2026, 10, 10));
+  assert.equal(M.normalizeState(s).tasks.length, s.tasks.length);
+  assert.ok(s.tasks.length >= 12);
+  assert.ok(s.tasks.every(t => t.assignees.every(id => s.people.some(p => p.id === id))));
+  assert.ok(s.tasks.some(t => t.done) && s.tasks.some(t => !t.done));
+});
+
+const redesign = () => {
+  const s = base();
+  s.roles = [
+    { id: 'preacher', name: 'Preacher', slots: 1 },
+    { id: 'bible', name: 'Bible reading', slots: 1 },
+    { id: 'keys', name: 'Keys', slots: 2 },
+    { id: 'sound', name: 'Sound', slots: 1 },
+    { id: 'kids', name: 'Kids church', slots: 1 },
+  ];
+  s.people = [
+    { id: 'a', name: 'Ana R.', roleIds: ['bible', 'keys'], unavailable: ['2026-11-20', '2026-11-21', '2026-11-22', '2026-11-23', '2027-01-03'] },
+    { id: 'b', name: 'Ben T.', roleIds: ['keys', 'kids'], unavailable: [] },
+    { id: 'c', name: 'Cy L.', roleIds: ['preacher'], unavailable: [] },
+  ];
+  return s;
+};
+
+test('monthSummary counts slots, open places and one clash per person per role', () => {
+  const s = redesign();
+  s.services = [
+    { ...M.newService({ date: '2026-11-08' }), assignments: { preacher: ['c'], keys: ['b'], kids: ['b'] } },
+    { ...M.newService({ date: '2026-11-22' }), assignments: { bible: ['a'], sound: ['a'] } }, // away and not set up: one clash per role
+    M.newService({ date: '2026-12-06' }),
+  ];
+  const sum = M.monthSummary(s, 2026, 11);
+  assert.equal(sum.services, 2);
+  assert.equal(sum.filled, 5);
+  assert.equal(sum.total, 12);
+  assert.equal(sum.open, 7);
+  assert.equal(sum.clashes.length, 3);
+  assert.equal(M.clashSentence(s, sum.clashes[0].service, sum.clashes[0].clash), 'Ben T. on kids church, Sun 8 Nov: also on Keys.');
+  assert.equal(M.clashSentence(s, sum.clashes[1].service, sum.clashes[1].clash), 'Ana R. on bible reading, Sun 22 Nov: away 20–23 Nov.');
+});
+
+test('awayRanges joins consecutive dates and drops the past', () => {
+  const dates = ['2026-11-23', '2026-11-20', '2026-11-21', '2026-11-22', '2027-01-03', '2026-10-01'];
+  assert.deepEqual(M.awayRanges(dates, '2026-11-09').map(M.formatRange), ['20–23 Nov', '3 Jan']);
+  assert.equal(M.formatRange({ start: '2026-11-30', end: '2026-12-02' }).replace(/\s+/g, ' '), '30 Nov – 2 Dec');
+});
+
+test('autoFillMonth spreads the month, skips the past and leaves existing picks', () => {
+  const s = redesign();
+  s.services = [
+    M.newService({ date: '2026-11-01' }),
+    { ...M.newService({ date: '2026-11-08' }), assignments: { keys: ['b'] } },
+    M.newService({ date: '2026-11-15' }),
+  ];
+  const { changed, filled } = M.autoFillMonth(s, 2026, 11, '2026-11-02');
+  assert.deepEqual(changed.map(x => x.date), ['2026-11-08', '2026-11-15']);
+  assert.deepEqual(changed[0].assignments, { preacher: ['c'], bible: ['a'], keys: ['b'] });
+  assert.ok(filled >= 3);
+  assert.equal(s.services[1].assignments.keys.length, 1, 'the original state is untouched');
+  assert.equal(M.autoFillMonth({ ...s, people: [] }, 2026, 11).changed.length, 0);
+});
+
+test('assignOptions splits who can and cannot take a place', () => {
+  const s = redesign();
+  const target = { ...M.newService({ date: '2026-11-22' }), assignments: { keys: ['b'] } };
+  s.services = [target, { ...M.newService({ date: '2026-11-08' }), assignments: { keys: ['b'] } }];
+  s.people.push({ id: 'd', name: 'Dee', roleIds: ['keys'], unavailable: [] });
+  const open = M.assignOptions(s, target, 'keys', 1);
+  assert.deepEqual(open.available.map(x => [x.person.name, x.note]), [['Dee', 'Free this Sunday']]);
+  assert.deepEqual(open.unavailable.map(x => [x.person.name, x.note]), [['Ana R.', 'Away 20–23 Nov'], ['Ben T.', 'Already on Keys']]);
+  const filled = M.assignOptions(s, target, 'keys', 0);
+  assert.equal(filled.current, 'b');
+  assert.deepEqual(filled.available.map(x => [x.person.name, x.note]), [['Ben T.', 'Also rostered 8 Nov'], ['Dee', 'Free this Sunday']]);
+});
+
+test('ministerMonth lights a dot per service and calls three of four busy', () => {
+  const list = ['01', '08', '15', '22'].map((d, i) => ({ ...M.newService({ date: `2026-11-${d}` }), assignments: i < 3 ? { keys: ['b'] } : {} }));
+  assert.deepEqual(M.ministerMonth(list, 'b', 2026, 11), { dots: [true, true, true, false], load: 3, total: 4, busy: true });
+  assert.equal(M.ministerMonth(list.slice(0, 2), 'b', 2026, 11).busy, false);
+  assert.equal(M.ministerMonth([], 'b', 2026, 11).busy, false);
+});
+
+test('roleGroups sorts free-text roles into the phone sections', () => {
+  const names = groups => groups.map(g => [g.name, g.roles.map(r => r.name)]);
+  assert.deepEqual(names(M.roleGroups(M.DEFAULT_ROLES)), [
+    ['Preaching', ['Preacher']], ['Worship', ['Worship Leader', 'Worship Team']], ['Tech', ['Tech (Sound & Slides)']], ['Welcome & care', ['Opening Prayer']],
+  ]);
+  assert.deepEqual(names(M.roleGroups(redesign().roles)).map(g => g[0]), ['Preaching', 'Worship', 'Tech', 'Welcome & care']);
+  assert.equal(M.roleGroups([{ id: 'x', name: 'Closing Prayer' }])[0].name, 'Welcome & care');
+  assert.equal(M.roleGroups([{ id: 'x', name: 'Singers' }])[0].name, 'Worship');
+});
+
+test('shortScripture only drops a repeated book name', () => {
+  assert.equal(M.shortScripture('Romans', 'Romans 8:1-11'), '8:1-11');
+  assert.equal(M.shortScripture('Advent', 'Isaiah 9:2-7'), 'Isaiah 9:2-7');
+  assert.equal(M.shortScripture('', 'Romans 8'), 'Romans 8');
+});
+
+test('seriesStatuses and the timeline come from the dates', () => {
+  const s = redesign();
+  s.series = [
+    { id: 'old', name: 'Old', start: '2026-01-01', end: '2026-02-01' },
+    { id: 'now', name: 'Romans', start: '2026-09-27', end: '2026-11-22' },
+    { id: 'soon', name: 'Advent', start: '2026-11-29', end: '2026-12-20' },
+    { id: 'later', name: 'Psalms', start: '2027-01-03', end: '2027-02-07' },
+    { id: 'booked', name: 'Acts', start: '2027-01-10', end: '2027-01-24' },
+    { id: 'undated', name: 'Someday', start: '', end: '' },
+  ];
+  s.services = [{ ...M.newService({ date: '2027-01-10' }), sermon: { title: '', scripture: '', seriesId: 'booked' }, assignments: { preacher: ['c'] } }];
+  assert.deepEqual([...M.seriesStatuses(s, '2026-11-09')], [['old', 'past'], ['now', 'current'], ['soon', 'next'], ['later', 'draft'], ['booked', 'planned'], ['undated', 'draft']]);
+  const t = M.seriesTimeline(s.series, '2026-11-09');
+  assert.deepEqual(t.heads.map(h => h.label), ['Sep', 'Oct', 'Nov', 'Dec', 'Jan 2027', 'Feb']);
+  assert.deepEqual(t.rows.map(r => r.series.id), ['now', 'soon', 'later', 'booked']);
+  assert.ok(t.today > 30 && t.today < 45);
+  assert.ok(t.rows.every(r => r.width > 0 && r.left + r.width <= 100.001));
+  const open = { ...s, series: [{ id: 'x', start: '2027-01-01', end: '' }, { id: 'y', start: '2027-02-01', end: '2027-03-01' }] };
+  assert.deepEqual([...M.seriesStatuses(open, '2026-11-09')], [['x', 'draft'], ['y', 'next']], 'a series with no end date cannot be up next');
 });

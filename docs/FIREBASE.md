@@ -29,7 +29,10 @@ churches/{churchId}/roles/{roleId}       { name, slots, order }
 churches/{churchId}/people/{personId}    { name, contact, email, roleIds[], unavailable[] }
 churches/{churchId}/series/{seriesId}    { name, color, start, end, description }
 churches/{churchId}/services/{serviceId} { date, time, name, assignments{}, sermon{}, setlist[], notes }
+churches/{churchId}/tasks/{taskId}       { week, title, assignees[], notes, done }
 ```
+
+**A new collection's rule goes live before its code.** The app reads every collection when a church opens, and treats "permission denied" as "you were removed", which signs that person out of their church. So run `firebase deploy --only firestore:rules` first, then push. Pushing to `main` deploys GitHub Pages straight away.
 
 ## Store methods → Firestore
 
@@ -48,7 +51,7 @@ offline (persistent cache). A refused write goes to `onError`, which shows a toa
 ## Security rules
 
 [firestore.rules](../firestore.rules):
-- **Members** read and write the church's four collections, and may update its settings.
+- **Members** read and write the church's five collections, and may update its settings.
 - **The admin** is the only one who can change `members`.
 - **A non-member** may make one change only: adding *their own* uid as `editor`. That is the invite join.
 - **`users/{uid}`** is readable and writable only by that user.

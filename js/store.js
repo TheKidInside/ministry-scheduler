@@ -2,20 +2,20 @@
 // localStorage for Firebase later means writing one new class, not touching the views.
 //
 // Store interface (all async):
-//   load()                    -> full state { settings, roles, people, series, services }
+//   load()                    -> full state { settings, roles, people, series, services, tasks }
 //   putDoc(collection, doc)   -> insert or replace one doc by doc.id
 //   deleteDoc(collection, id) -> remove one doc
 //   putSettings(settings)     -> replace the settings object
 //   replaceAll(state)         -> overwrite everything (import / reset)
 //   subscribe(callback)       -> callback(state) when data changes elsewhere; returns unsubscribe
 //
-// Collections: roles, people, series, services. In Firestore these become
+// Collections: roles, people, series, services, tasks. In Firestore these become
 // churches/{churchId}/{collection}/{docId}, with settings at churches/{churchId}.
 // See docs/FIREBASE.md.
 
 import { emptyState, normalizeState } from './model.js';
 
-export const COLLECTIONS = ['roles', 'people', 'series', 'services'];
+export const COLLECTIONS = ['roles', 'people', 'series', 'services', 'tasks'];
 const KEY = 'ministry-scheduler:v1';
 
 export class LocalStore {

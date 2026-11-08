@@ -9,6 +9,7 @@ Usage:
   firebase emulators:start --only auth,firestore --project demo-ministry   (from the app folder)
   py -3 tests\\cloud_e2e.py [base_url]
 """
+import base64
 import json
 import sys
 import time
@@ -20,6 +21,10 @@ PROJECT = "demo-ministry"
 CONFIG = ("export const firebaseConfig = { apiKey: 'demo-key', authDomain: 'localhost', projectId: '%s', appId: 'demo',"
           " emulator: { auth: 'http://127.0.0.1:9099', firestore: ['127.0.0.1', 8085] } };" % PROJECT)
 errors = []
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==")
+FORGE = """async ([cid, uid, field]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+  try { await F.updateDoc(F.doc(db, 'churches', cid), { [`${field}.${uid}`]: 'data:image/jpeg;base64,AAAA' }); return 'allowed'; }
+  catch (e) { return e.code; } }"""
 sys.stdout.reconfigure(encoding="utf-8")
 
 
@@ -88,11 +93,11 @@ with sync_playwright() as p:
     b.fill("dialog input[name=password]", "secret123")
     b.click('dialog button[value="create"]')
     b.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
-    b.wait_for_selector(".matrix tbody tr")
-    check(b.locator(".matrix tbody tr").count() == rows_a, "the leader sees the same services as the pastor")
+    b.wait_for_selector(".day-pill")
+    check(b.locator(".day-pill").count() == rows_a, "the leader sees the same services as the pastor")
 
     # 3. A change on the phone shows up live on the pastor's screen
-    b.locator(".matrix tbody tr").first.click()
+    b.locator(".day-card").tap()
     b.fill('dialog input[name="sermon-title"]', "Live From The Phone")
     b.click('dialog .dialog-actions button[value="save"]')
     a.click('[data-tab="preaching"]')
@@ -103,8 +108,13 @@ with sync_playwright() as p:
     a.click('[data-tab="ministers"]')
     a.click('[data-action="new-person"]')
     a.fill('dialog input[name="name"]', "Synced Person")
+    check(a.locator("dialog [data-link-mode]").count() == 3 and a.locator('dialog input[name="email"]').count() == 0,
+          "a minister with no email offers invite, registered user, or blank")
+    a.click('dialog [data-link-mode="invite"]')
     a.fill('dialog input[name="email"]', "Leader@Example.com")
     a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .invite-preview")
+    a.click('dialog .dialog-actions button[value="cancel"]')
     b.click('[data-tab="ministers"]')
     b.wait_for_selector(".person:has-text('Synced Person')", timeout=15000)
     check(True, "a new minister reaches the other device")
@@ -114,7 +124,7 @@ with sync_playwright() as p:
     check(b.is_visible("#mine-btn") and not b.is_visible("#mine-btn .bell-count"), "signed in to a church, the bell shows with nothing new")
     a.click('[data-tab="schedule"]')
     a.click('[data-action="next"]')  # next month, so the service is still upcoming
-    a.locator(".matrix tbody tr").first.click()
+    a.locator(".matrix tbody .when").first.click()
     a.wait_for_selector("dialog[open]")
     a.locator('dialog select[name="role:tech"]').first.select_option(label="Synced Person")
     a.click('dialog .dialog-actions button[value="save"]')
@@ -136,9 +146,97 @@ with sync_playwright() as p:
     b.wait_for_timeout(1500)
     check(b.is_visible("#mine-btn") and not b.is_visible("#mine-btn .bell-count"), "seen assignments stay seen after a reload")
 
+    # 4b2. The same for a weekly task: the bell lights up live, and ticking it syncs back
+    a.click('[data-tab="tasks"]')  # still on next month, so the week is upcoming
+    a.locator('[data-action="new-task"]').first.click()
+    a.wait_for_selector("dialog[open]")
+    a.fill('dialog input[name="title"]', "Bring the new cables")
+    a.locator("dialog .assignees label.check", has_text="Synced Person").locator("input").check()
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .notify-list", timeout=5000)
+    a.click('dialog .dialog-actions button[value="cancel"]')
+    b.wait_for_selector("#mine-btn .bell-count:not([hidden])", timeout=15000)
+    check(b.inner_text("#mine-btn .bell-count") == "1", "a new task lights up the minister's bell, live")
+    b.click("#mine-btn")
+    b.wait_for_selector("dialog[open] .mine-list")
+    check("Bring the new cables" in b.inner_text("dialog") and b.locator("dialog .mine-list .is-new").count() == 1, "the bell lists the new task")
+    b.click('dialog .dialog-actions button[value="cancel"]')
+    b.wait_for_selector("#mine-btn .bell-count", state="hidden", timeout=5000)
+    b.click('[data-tab="tasks"]')
+    b.click('[data-action="next"]')
+    b.locator(".task", has_text="Bring the new cables").locator(".task-check input").click()
+    a.wait_for_selector(".task.done:has-text('Bring the new cables')", timeout=15000)
+    check(True, "ticking a task on the phone shows as done on the other device")
+    b.click('[data-action="prev"]')
+
+    # 4c. "Send an invite": the link carries the minister, and accepting it links their account
+    a.click('[data-tab="ministers"]')
+    a.click('[data-action="new-person"]')
+    a.fill('dialog input[name="name"]', "Invited Person")
+    a.click('dialog [data-link-mode="invite"]')
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .invite-preview")
+    text = a.inner_text("dialog .invite-preview")
+    personal = text[text.index("http"):].strip()
+    check("&as=" in personal and "Invited" in text, "the invite is written for that minister")
+    a.click('dialog .dialog-actions button[value="cancel"]')
+    check("No sign-in" in a.locator(".person", has_text="Invited Person").inner_text(), "not linked until they accept")
+    c = browser_page(browser, phone=True)
+    c.goto(personal)
+    c.wait_for_selector("dialog[open] input[name=email]", timeout=15000)
+    c.fill("dialog input[name=email]", "invited@example.com")
+    c.fill("dialog input[name=password]", "secret123")
+    c.click('dialog button[value="create"]')
+    c.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    a.wait_for_function("[...document.querySelectorAll('.person')].find(p => p.textContent.includes('Invited Person')).querySelector('.person-link.on')", timeout=15000)
+    check(True, "accepting a personal invite links the account to that minister")
+
+    # 4c-2. Your profile: a new name and photo reach your minister, live
+    c.click("#account-btn")
+    c.wait_for_selector("dialog[open] input[name='profile-name']")
+    check(c.input_value("dialog input[name='profile-name']") == "Invited Person", "your profile starts from your minister's name")
+    c.wait_for_timeout(450)
+    check(c.evaluate("(d => d.scrollWidth <= d.clientWidth)(document.querySelector('dialog .dialog-body'))"), "the profile fits a phone")
+    c.set_input_files("#profile-photo", files=[{"name": "me.png", "mimeType": "image/png", "buffer": PNG}])
+    c.wait_for_selector("dialog .profile-avatar img", timeout=5000)
+    check(c.get_attribute("dialog .profile-avatar img", "src").startswith("data:image/jpeg"), "an uploaded picture is shrunk to a JPEG")
+    c.fill("dialog input[name='profile-name']", "Renamed Person")
+    c.click('dialog button[value="profile"]')
+    a.wait_for_selector(".person:has-text('Renamed Person') img.mono", timeout=15000)
+    check(a.locator(".person", has_text="Invited Person").count() == 0, "changing your name renames your minister, with the photo, live")
+    c.wait_for_timeout(800)
+    c.click("#account-btn")
+    c.wait_for_selector("dialog[open] .members li", timeout=15000)
+    c.wait_for_function("document.querySelector('dialog .members').textContent.includes('Renamed Person')", timeout=15000)
+    check(True, "the members list shows the new name")
+    c.click('dialog .dialog-actions button[value="cancel"]')
+    cid_now = invite.split("#join=")[1]
+    pastor = a.evaluate("async () => { const C = await import('/js/cloud.js'); return (await C.cloud()).auth.currentUser.uid; }")
+    for field in ("memberPhotos", "memberNames"):
+        check(c.evaluate(FORGE, [cid_now, pastor, field]) == "permission-denied", f"a member can't change someone else's {field}")
+
+    # 4d. "Registered user": pick someone who has already joined
+    a.click('[data-action="new-person"]')
+    a.fill('dialog input[name="name"]', "Picked Person")
+    a.click('dialog [data-link-mode="member"]')
+    a.wait_for_selector('dialog select[name="member"]')
+    options = a.locator('dialog select[name="member"] option').all_inner_texts()
+    check(not any("Renamed" in o for o in options) and any("leader" in o for o in options), f"the list leaves out accounts already linked {options}")
+    a.click('dialog .dialog-actions button[value="save"]')
+    check(a.locator("dialog[open]").count() == 1, "choosing nobody keeps the sheet open")
+    a.select_option('dialog select[name="member"]', label="leader")
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.locator(".person", has_text="Picked Person").locator(".person-link.on").wait_for(timeout=5000)
+    a.locator(".person", has_text="Picked Person").click()
+    a.wait_for_selector("dialog[open] .linked-row")
+    check("leader" in a.inner_text("dialog .linked-row"), "a linked minister shows who they are linked to")
+    a.click('dialog [data-link="unlink"]')
+    check(a.locator("dialog [data-link-mode]").count() == 3, "unlinking brings the three options back")
+    a.click('dialog .dialog-actions button[value="cancel"]')
+
     # 5. Members list shows both; leader is an editor
     a.click("#account-btn")
-    a.wait_for_selector("dialog[open] .members li:nth-child(2)", timeout=15000)
+    a.wait_for_selector("dialog[open] .members li:nth-child(3)", timeout=15000)
     members = a.inner_text("dialog .members").lower()
     check("editor" in members and "leader" in members, "the pastor sees the leader as an editor")
     a.click('dialog .dialog-actions button[value="cancel"]')
@@ -155,10 +253,18 @@ with sync_playwright() as p:
     # 5c. The admin removes the leader: the leader's phone drops back to its own copy,
     #     and the same invite link can't bring them back
     a.locator("dialog .members li", has_text="leader").locator("[data-remove-member]").click()
-    a.wait_for_function("document.querySelectorAll('dialog .members li').length === 1", timeout=15000)
+    a.wait_for_function("document.querySelectorAll('dialog .members li').length === 2", timeout=15000)
     a.click('dialog .dialog-actions button[value="cancel"]')
+
+    # 5d. Leaving a church takes your photo with you
+    c.click("#account-btn")
+    c.click('dialog button[value="leave"]')
+    c.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'synced'", timeout=20000)
+    left = a.evaluate("async cid => { const C = await import('/js/cloud.js'); const i = await C.churchInfo(cid); return [Object.keys(i.members).length, Object.keys(i.memberPhotos).length]; }", cid_now)
+    check(left == [1, 0], f"leaving removes your name and photo from the church {left}")
+    c.context.close()
     b.click('[data-tab="schedule"]')
-    b.locator(".matrix tbody tr").first.click()
+    b.locator(".day-card").tap()
     b.fill('dialog input[name="sermon-title"]', "After Removal")
     b.click('dialog .dialog-actions button[value="save"]')
     b.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'synced'", timeout=20000)

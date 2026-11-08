@@ -2,7 +2,7 @@
 // Dates are built around the month you open the app in.
 
 import {
-  emptyState, generateMonthServices, autoFill, shiftMonth, toISO, daysInMonth, SERIES_COLORS,
+  emptyState, generateMonthServices, autoFill, shiftMonth, toISO, daysInMonth, todayISO, weeksInMonth, newTask, SERIES_COLORS,
 } from './model.js';
 
 const PEOPLE = [
@@ -45,6 +45,9 @@ const SONGS = [
   ['Come Thou Fount', 'D'], ['Great Is Thy Faithfulness', 'D'], ['All Hail the Power of Jesus’ Name', 'G'],
   ['Crown Him with Many Crowns', 'D'], ['How Firm a Foundation', 'G'], ['Blessed Assurance', 'D'],
 ];
+
+// The same few jobs every week; one is left unassigned so the Tasks tab shows what that looks like.
+const WEEKLY_TASKS = [['Confirm the roster with the team', 'p7'], ['Send the slides to Tech', 'p2'], ['Print the bulletin', '']];
 
 export function sampleState(now = new Date()) {
   const state = emptyState();
@@ -89,5 +92,9 @@ export function sampleState(now = new Date()) {
     state.services[i] = filled; // later services see earlier loads when balancing
     return filled;
   });
+  const today = todayISO(now);
+  state.tasks = weeksInMonth(y, m, state.settings.defaultDay).flatMap(({ end }) => WEEKLY_TASKS.map(([title, person], i) => ({
+    ...newTask({ week: end, title, assignees: person ? [person] : [] }), id: `task_${end}_${i}`, done: end < today,
+  })));
   return state;
 }

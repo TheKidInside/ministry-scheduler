@@ -153,6 +153,58 @@ export function songLibrary(services) {
   return [...out.values()].sort((a, b) => a.title.localeCompare(b.title));
 }
 
+// ---------- weekly tasks ----------
+
+export function addDays(iso, n) {
+  const { y, m, d } = parseISO(iso);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return toISO(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+}
+
+// A church week runs up to its service day, so a week is named by that day. A task saved
+// before the usual day changed lands on the nearest new service day, at most three days away.
+export function weekOfDate(iso, day = 0) {
+  const ahead = (Number(day) - weekday(iso) + 7) % 7;
+  return addDays(iso, ahead > 3 ? ahead - 7 : ahead);
+}
+
+// The weeks of a month: one for each usual service day that falls in it.
+export function weeksInMonth(y, m, day = 0) {
+  const out = [];
+  for (let d = 1; d <= daysInMonth(y, m); d++) {
+    const end = toISO(y, m, d);
+    if (weekday(end) === Number(day)) out.push({ end, start: addDays(end, -6) });
+  }
+  return out;
+}
+
+export function newTask({ week, title = '', assignees = [], notes = '' }) {
+  return { id: uid('task_'), week, title, assignees, notes, done: false };
+}
+
+// In the order they were added: ids start with their creation time, and Firestore won't keep list order.
+export function tasksInWeek(tasks, end, day = 0) {
+  return tasks.filter(t => weekOfDate(t.week, day) === end).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// One key per task and week, so moving a task to another week counts as new.
+export const taskKey = task => `task:${task.id}:${task.week}`;
+
+// A person's unfinished tasks from this week onward, each with the key used to remember what they've seen.
+export function tasksFor(state, personId, fromISO) {
+  const day = state.settings.defaultDay;
+  return state.tasks
+    .map(task => ({ task, week: weekOfDate(task.week, day), keys: [taskKey(task)] }))
+    .filter(x => !x.task.done && x.task.assignees.includes(personId) && x.week >= fromISO)
+    .sort((a, b) => a.week.localeCompare(b.week) || a.task.id.localeCompare(b.task.id));
+}
+
+// Who an edit newly gave this task. Moving it to another week makes everyone on it new, as with a service.
+export function addedTaskPeople(before, after) {
+  const had = new Set(before && before.week === after.week ? before.assignees : []);
+  return after.assignees.filter(id => !had.has(id));
+}
+
 // ---------- series ----------
 
 export function seriesCoveringDate(series, iso) {
@@ -262,6 +314,219 @@ export function autoFill(state, service) {
   return { ...service, assignments };
 }
 
+// ---------- what a month still needs ----------
+
+// "Sun 8 Nov", however the browser's locale punctuates it.
+export const shortDate = iso => formatDate(iso, { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+
+// One clash per person per role, even if someone is both away and not set up for it.
+export function serviceClashes(state, service) {
+  const seen = new Set();
+  return serviceConflicts(state, service).filter(c => {
+    const key = `${c.roleId}:${c.personId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function serviceSummary(state, service) {
+  let filled = 0;
+  let open = 0;
+  for (const role of state.roles) {
+    const count = assigned(service, role.id).filter(Boolean).length;
+    filled += count;
+    open += Math.max(0, (role.slots || 1) - count);
+  }
+  return { filled, open, total: filled + open, clashes: serviceClashes(state, service) };
+}
+
+export function monthSummary(state, y, m) {
+  const services = servicesInMonth(state.services, y, m);
+  const out = { services: services.length, filled: 0, open: 0, total: 0, clashes: [] };
+  for (const service of services) {
+    const s = serviceSummary(state, service);
+    out.filled += s.filled;
+    out.open += s.open;
+    out.total += s.total;
+    for (const clash of s.clashes) out.clashes.push({ service, clash });
+  }
+  return out;
+}
+
+// Consecutive away dates read better as one range: 20-23 Nov.
+export function awayRanges(dates, fromISO = '') {
+  const out = [];
+  for (const d of [...new Set(dates || [])].sort()) {
+    const last = out[out.length - 1];
+    if (last && addDays(last.end, 1) === d) last.end = d;
+    else out.push({ start: d, end: d });
+  }
+  return out.filter(r => r.end >= fromISO);
+}
+
+export function formatRange({ start, end }) {
+  const a = parseISO(start);
+  const b = parseISO(end);
+  const mon = iso => formatDate(iso, { month: 'short' });
+  if (start === end) return `${a.d} ${mon(start)}`;
+  if (a.y === b.y && a.m === b.m) return `${a.d}–${b.d} ${mon(end)}`;
+  return `${a.d} ${mon(start)} – ${b.d} ${mon(end)}`;
+}
+
+// The short reason shown beside a name.
+export function clashNote(state, service, c) {
+  const person = state.people.find(p => p.id === c.personId);
+  switch (c.type) {
+    case 'unavailable': {
+      const range = awayRanges(person.unavailable).find(r => r.start <= service.date && service.date <= r.end);
+      return `Away ${formatRange(range)}`;
+    }
+    case 'not-qualified': return 'Not set up for this role';
+    case 'double-booked': return `Also on ${state.roles.find(r => r.id === c.otherRoleId)?.name || 'another role'}`;
+    default: return 'No longer on the team';
+  }
+}
+
+// The full line in the month's alert: "Joel P. on keys, Sun 8 Nov: also on Bible reading."
+export function clashSentence(state, service, c) {
+  const name = state.people.find(p => p.id === c.personId)?.name || 'Someone';
+  const role = (state.roles.find(r => r.id === c.roleId)?.name || c.roleId).toLowerCase();
+  const note = clashNote(state, service, c);
+  return `${name} on ${role}, ${shortDate(service.date)}: ${note[0].toLowerCase()}${note.slice(1)}.`;
+}
+
+const countPeople = service => Object.values(service.assignments || {}).flat().filter(Boolean).length;
+
+// Auto-fill every service in a month from a date onward. Each filled service counts towards
+// the next one's load, so the month spreads across the team.
+export function autoFillMonth(state, y, m, fromISO = '') {
+  let services = state.services;
+  const changed = [];
+  let filled = 0;
+  for (const service of servicesInMonth(state.services, y, m)) {
+    if (service.date < fromISO) continue;
+    const next = autoFill({ ...state, services }, service);
+    const added = countPeople(next) - countPeople(service);
+    if (added <= 0) continue;
+    filled += added;
+    changed.push(next);
+    services = services.map(s => (s.id === next.id ? next : s));
+  }
+  return { changed, filled };
+}
+
+// Who can take one slot on one service. Anyone already on this service, or away, can be seen
+// but not picked. The least busy come first.
+export function assignOptions(state, service, roleId, slot = 0) {
+  const { y, m } = parseISO(service.date);
+  const others = servicesInMonth(state.services, y, m).filter(s => s.id !== service.id);
+  const current = assigned(service, roleId)[slot] || '';
+  const weekdayName = formatDate(service.date, { weekday: 'long' });
+  const takenBy = new Map();
+  for (const role of state.roles) {
+    assigned(service, role.id).forEach((id, i) => {
+      if (id && !(role.id === roleId && i === slot) && !takenBy.has(id)) takenBy.set(id, role.name);
+    });
+  }
+  const available = [];
+  const unavailable = [];
+  for (const person of state.people.filter(p => canServe(p, roleId))) {
+    if (isUnavailable(person, service.date)) {
+      unavailable.push({ person, note: clashNote(state, service, { type: 'unavailable', personId: person.id }) });
+    } else if (takenBy.has(person.id)) {
+      unavailable.push({ person, note: `Already on ${takenBy.get(person.id)}` });
+    } else {
+      const dates = others.filter(s => peopleOnService(s).has(person.id)).map(s => s.date);
+      const days = dates.map(d => parseISO(d).d);
+      const list = days.length > 1 ? `${days.slice(0, -1).join(', ')} & ${days[days.length - 1]}` : days[0];
+      const note = dates.length ? `Also rostered ${list} ${formatDate(dates[0], { month: 'short' })}` : `Free this ${weekdayName}`;
+      available.push({ person, note, load: dates.length });
+    }
+  }
+  available.sort((a, b) => (b.person.id === current) - (a.person.id === current) || a.load - b.load || a.person.name.localeCompare(b.person.name));
+  unavailable.sort((a, b) => a.person.name.localeCompare(b.person.name));
+  return { current, available, unavailable };
+}
+
+// One dot per service this month, lit when this person is on it.
+export function ministerMonth(services, personId, y, m) {
+  const dots = servicesInMonth(services, y, m).map(s => peopleOnService(s).has(personId));
+  const load = dots.filter(Boolean).length;
+  return { dots, load, total: dots.length, busy: load >= 3 && load / dots.length >= 0.75 };
+}
+
+// Roles are free text, so the phone's sections come from their names.
+const ROLE_GROUPS = [
+  ['Preaching', /preach|bible|scripture|reading|sermon|homily/i],
+  ['Worship', /worship|music|\bkeys?\b|keyboard|piano|guitar|\bbass\b|drum|vocal|\bsing|choir|\bband\b/i],
+  ['Tech', /tech|sound|audio|slide|stream|media|projection|lighting|camera|video/i],
+  ['Welcome & care', /./],
+];
+
+export function roleGroups(roles) {
+  const out = ROLE_GROUPS.map(([name]) => ({ name, roles: [] }));
+  for (const role of roles) {
+    const i = role.id === PREACHER_ROLE ? 0 : ROLE_GROUPS.findIndex(([, re]) => re.test(role.name));
+    out[i].roles.push(role);
+  }
+  return out.filter(g => g.roles.length);
+}
+
+// A passage inside a series of the same name drops the repeat: "Romans · 8:1-11".
+export function shortScripture(seriesName, scripture) {
+  const s = String(scripture ?? '').trim();
+  const prefix = `${String(seriesName ?? '').trim()} `;
+  return prefix.length > 1 && s.toLowerCase().startsWith(prefix.toLowerCase()) ? s.slice(prefix.length) : s;
+}
+
+const daysBetween = (a, b) => {
+  const u = iso => { const { y, m, d } = parseISO(iso); return Date.UTC(y, m - 1, d); };
+  return Math.round((u(b) - u(a)) / 86400000);
+};
+
+export const SERIES_STATUS = {
+  current: 'Current', next: 'Up next', planned: 'Planned', draft: 'Draft', past: 'Finished',
+};
+
+// Worked out from the dates, so nothing extra is stored. A later series nobody is booked
+// to preach yet is still a draft.
+export function seriesStatuses(state, today) {
+  const nextUp = state.series.filter(s => s.start > today && s.end).sort((a, b) => a.start.localeCompare(b.start))[0]?.id;
+  const out = new Map();
+  for (const s of state.series) {
+    const booked = state.services.some(x => x.sermon?.seriesId === s.id && assigned(x, PREACHER_ROLE).some(Boolean));
+    let status = 'draft';
+    if (s.start && s.end) {
+      if (s.end < today) status = 'past';
+      else if (s.start <= today) status = 'current';
+      else if (s.id === nextUp) status = 'next';
+      else if (booked) status = 'planned';
+    }
+    out.set(s.id, status);
+  }
+  return out;
+}
+
+// Six months around today, every position a percentage of that span.
+export function seriesTimeline(series, today, months = 6) {
+  const { y, m } = parseISO(today);
+  const first = shiftMonth(y, m, -2);
+  const last = shiftMonth(first.y, first.m, months);
+  const from = toISO(first.y, first.m, 1);
+  const to = toISO(last.y, last.m, 1);
+  const span = daysBetween(from, to);
+  const pct = iso => Math.min(100, Math.max(0, (daysBetween(from, iso) / span) * 100));
+  const heads = Array.from({ length: months }, (_, i) => {
+    const mo = shiftMonth(first.y, first.m, i);
+    return { left: pct(toISO(mo.y, mo.m, 1)), label: `${MONTHS[mo.m - 1].slice(0, 3)}${mo.m === 1 ? ` ${mo.y}` : ''}` };
+  });
+  const rows = series.filter(s => s.start && s.end && s.end >= from && s.start < to)
+    .sort((a, b) => a.start.localeCompare(b.start))
+    .map(s => ({ series: s, left: pct(s.start), width: pct(addDays(s.end, 1)) - pct(s.start) }));
+  return { heads, rows, today: pct(today) };
+}
+
 // A person's assignments, soonest first, optionally from a date onward.
 export function personSchedule(state, personId, fromISO = '') {
   const out = [];
@@ -290,6 +555,29 @@ export function personEmail(person) {
 export function personPhone(person) {
   const c = String(person.contact ?? '').trim();
   return /^\+?[\d\s().-]{7,}$/.test(c) ? c.replace(/[^\d+]/g, '') : '';
+}
+
+// Profile photos are small JPEGs kept as text on the document (Firebase Storage needs a paid
+// plan). Anything else, from a hand-edited backup say, is dropped rather than shown.
+export const isPhoto = v => typeof v === 'string' && v.length <= 40000 && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v);
+
+const firstName = person => String(person.name).trim().split(/\s+/)[0] || person.name;
+
+// Which minister a signed-in account is: linked directly, or matched by sign-in email.
+export function findPersonForUser(people, user) {
+  if (!user) return null;
+  return people.find(p => p.userId && p.userId === user.uid) || findPersonByEmail(people, user.email);
+}
+
+// A church invite, from a whole link or the bare id. "&as=" names the minister it was sent to.
+export function parseInvite(text) {
+  const m = String(text ?? '').trim().match(/^(?:.*#join=)?([A-Za-z0-9]{10,40})(?:&as=([\w-]{1,80}))?$/);
+  return m ? { churchId: m[1], personId: m[2] || '' } : null;
+}
+
+export function inviteMessage(state, person, link) {
+  const first = firstName(person);
+  return `Hi ${first}, please join ${state.settings.churchName} on Ministry Scheduler so you can see when you're serving:\n${link}`;
 }
 
 export function findPersonByEmail(people, email) {
@@ -325,12 +613,22 @@ export function addedAssignments(before, after) {
 export function assignmentMessage(state, person, service, roleIds, link = '') {
   const roles = roleIds.map(id => state.roles.find(r => r.id === id)?.name || id);
   const roleText = roles.length > 1 ? `${roles.slice(0, -1).join(', ')} and ${roles[roles.length - 1]}` : roles[0] || 'serving';
-  const first = String(person.name).trim().split(/\s+/)[0] || person.name;
+  const first = firstName(person);
   const when = formatDate(service.date, { weekday: 'long', day: 'numeric', month: 'long' }) + (service.time ? `, ${service.time}` : '');
   const lines = [`Hi ${first}, you're on ${roleText} for ${service.name} on ${when}.`];
   const sermon = service.sermon || {};
   if (sermon.title || sermon.scripture) lines.push(`Sermon: ${[sermon.title, sermon.scripture].filter(Boolean).join(' · ')}`);
   if (service.setlist?.length) lines.push(`Setlist: ${service.setlist.map(songLabel).join(', ')}`);
+  lines.push(`${state.settings.churchName}`);
+  if (link) lines.push(`Your schedule: ${link}`);
+  return lines.join('\n');
+}
+
+// The text sent to someone you've just given a task.
+export function taskMessage(state, person, task, link = '') {
+  const week = formatDate(weekOfDate(task.week, state.settings.defaultDay), { weekday: 'long', day: 'numeric', month: 'long' });
+  const lines = [`Hi ${firstName(person)}, you have a task for the week of ${week}: ${task.title}.`];
+  if (task.notes) lines.push(task.notes);
   lines.push(`${state.settings.churchName}`);
   if (link) lines.push(`Your schedule: ${link}`);
   return lines.join('\n');
@@ -348,6 +646,10 @@ export function removePersonEverywhere(services, personId) {
     }
     return changed ? { ...s, assignments } : s;
   });
+}
+
+export function removePersonFromTasks(tasks, personId) {
+  return tasks.map(t => (t.assignees.includes(personId) ? { ...t, assignees: t.assignees.filter(id => id !== personId) } : t));
 }
 
 export function removeRoleEverywhere(services, roleId) {
@@ -374,6 +676,7 @@ export function emptyState() {
     people: [],
     series: [],
     services: [],
+    tasks: [],
   };
 }
 
@@ -432,7 +735,7 @@ export function normalizeState(raw) {
     },
     roles,
     people: arr(raw.people, 'people').filter(p => p && str(p.id) && str(p.name)).map(p => ({
-      id: str(p.id), name: str(p.name), contact: str(p.contact), email: normEmail(p.email),
+      id: str(p.id), name: str(p.name), contact: str(p.contact), email: normEmail(p.email), userId: str(p.userId), photo: isPhoto(p.photo) ? p.photo : '',
       roleIds: ids(p.roleIds), unavailable: ids(p.unavailable).filter(isValidISO),
     })),
     series: arr(raw.series, 'series').filter(x => x && str(x.id) && str(x.name)).map(x => ({
@@ -441,7 +744,32 @@ export function normalizeState(raw) {
       start: isValidISO(x.start) ? x.start : '', end: isValidISO(x.end) ? x.end : '',
     })),
     services,
+    tasks: arr(raw.tasks, 'tasks').filter(t => t && str(t.id) && str(t.title).trim() && isValidISO(t.week)).map(t => ({
+      id: str(t.id), week: t.week, title: str(t.title).trim().slice(0, 120),
+      assignees: [...new Set(ids(t.assignees))], notes: str(t.notes).slice(0, 500), done: t.done === true,
+    })),
   };
+}
+
+// The month as tables to share: a column per service, a row per role, names only.
+// A busier month than `maxColumns` services splits evenly into several tables.
+// Anyone no longer on the team is left out rather than announced as "Removed".
+export function announcementBlocks(state, y, m, maxColumns = 5) {
+  const names = new Map(state.people.map(p => [p.id, p.name]));
+  const services = servicesInMonth(state.services, y, m);
+  const perBlock = services.length <= maxColumns ? services.length : Math.ceil(services.length / Math.ceil(services.length / maxColumns));
+  const blocks = [];
+  for (let i = 0; i < services.length; i += perBlock) {
+    const part = services.slice(i, i + perBlock);
+    blocks.push({
+      services: part,
+      rows: state.roles.map(role => ({
+        role,
+        cells: part.map(svc => assigned(svc, role.id).map(id => names.get(id)).filter(Boolean)),
+      })),
+    });
+  }
+  return blocks;
 }
 
 // Plain-text month roster, ready to paste into a group chat.
