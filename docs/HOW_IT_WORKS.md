@@ -166,9 +166,11 @@ three months) so the screens explain themselves. It sets `settings.seeded`, so
 
 **Assigning one place.** An amber Assign button (or any row on the phone) opens `openAssign`, a single-purpose sheet. `M.assignOptions` sorts the team into who can take it, least busy first, and who can't and why. Think of a substitute list rather than the whole staff file: the full service editor is still there for overrides, such as putting on someone not set up for the role.
 
+**Who can change what.** Signed out, it's your own browser's copy and everything is editable. In a church, `canManage()` is true only for admins, and `preachesOn(svc)` for a service's own preacher. Every screen asks those two questions before drawing a button. That only tidies the page: the lock itself is in `firestore.rules`, as a shop's price tags don't stop anyone, the till does. A preacher's save goes through `patchDoc`, which touches only `sermon`, so it fits the one exception the rules allow.
+
 **Roles save one document at a time.** `writeRoles` writes only what changed instead of `replaceAll`, which rewrites the whole church. Another editor's change can arrive while these rows are on screen, so absence proves nothing: a role only counts as deleted if its X was pressed here (`removedRoles`), and only a row added here can create one. Without that, renaming a role could silently delete one a colleague had just added.
 
-Editors: `openServiceEditor`, `openPersonEditor`, `openSeriesEditor`, `openTaskEditor`. The service
+Editors: `openServiceEditor`, `openPersonEditor`, `openSeriesEditor`, `openTaskEditor`, and `openSermonEditor` for a preacher. The service
 editor recomputes conflicts on every change, so the warning box updates while you
 pick people. In each role dropdown, people who can serve are listed first, with
 "(away)" and "(2× this month)" hints. Its **Setlist** section has a row per song

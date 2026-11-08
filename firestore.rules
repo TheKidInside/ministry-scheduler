@@ -6,6 +6,23 @@ service cloud.firestore {
     function church(churchId) { return get(/databases/$(database)/documents/churches/$(churchId)).data; }
     function isMember(churchId) { return signedIn() && request.auth.uid in church(churchId).members; }
     function isAdmin(churchId) { return signedIn() && church(churchId).members[request.auth.uid] == 'admin'; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function myEmail() { return request.auth.token.get('email', '').lower(); }
+
+    // Is this minister the signed-in person? The same test as findPersonForUser in model.js.
+    function isMe(person) {
+      return person.get('userId', '') == request.auth.uid
+        || (myEmail() != '' && (person.get('email', '') == myEmail() || person.get('contact', '').trim().lower() == myEmail()));
+    }
+    function preacherIsMe(churchId, ids, i) {
+      return ids.size() > i && isMe(get(/databases/$(database)/documents/churches/$(churchId)/people/$(ids[i])).data);
+    }
+    function validSermon(s) {
+      return s.keys().hasOnly(['title', 'scripture', 'seriesId'])
+        && s.title is string && s.title.size() <= 120
+        && s.scripture is string && s.scripture.size() <= 120
+        && s.seriesId is string && s.seriesId.size() <= 80;
+    }
 
     // Which church you belong to. Only you can read or change it.
     match /users/{uid} {
@@ -18,10 +35,8 @@ service cloud.firestore {
       allow create: if signedIn()
         && request.resource.data.members.keys().hasOnly([request.auth.uid])
         && request.resource.data.members[request.auth.uid] == 'admin';
-      // Members edit the settings; only an admin changes who is a member.
-      allow update: if (isMember(churchId)
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['members', 'memberNames', 'memberPhotos', 'removed', 'createdAt']))
-        || isAdmin(churchId)
+      // Only an admin changes the settings or who is a member.
+      allow update: if isAdmin(churchId)
         // Leaving: a member may take themselves (and only themselves) off the list.
         || (isMember(churchId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberNames', 'memberPhotos'])
@@ -51,7 +66,40 @@ service cloud.firestore {
       allow delete: if isAdmin(churchId);
 
       match /{collection}/{docId} {
-        allow read, write: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isMember(churchId);
+        allow read: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isMember(churchId);
+        // Only an admin changes the schedule, ministers, series, roles or tasks. The two blocks
+        // below are the only exceptions.
+        allow write: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isAdmin(churchId);
+      }
+
+      // A preacher may edit the sermon on a service they are assigned to preach, and nothing else on it.
+      match /services/{serviceId} {
+        allow update: if isMember(churchId)
+          && changed().hasOnly(['sermon'])
+          && validSermon(request.resource.data.sermon)
+          && (preacherIsMe(churchId, resource.data.assignments.get('preacher', []), 0)
+            || preacherIsMe(churchId, resource.data.assignments.get('preacher', []), 1)
+            || preacherIsMe(churchId, resource.data.assignments.get('preacher', []), 2));
+      }
+
+      match /people/{personId} {
+        // Your own minister: your name and photo.
+        allow update: if isMember(churchId)
+          && isMe(resource.data)
+          && changed().hasOnly(['name', 'photo'])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 60
+          && request.resource.data.get('photo', '') is string
+          && request.resource.data.get('photo', '').size() <= 40000;
+        // Accepting a personal invite: link yourself to a minister nobody has claimed, unless
+        // they already have someone else's email on file.
+        allow update: if isMember(churchId)
+          && resource.data.get('userId', '') == ''
+          && resource.data.get('email', '') in ['', myEmail()]
+          && changed().hasOnly(['userId', 'email'])
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.get('email', '') == myEmail();
       }
     }
   }

@@ -173,13 +173,14 @@ try:
             b.wait_for_function(f"document.querySelectorAll('.day-pill').length === {rows_a}", timeout=15000)
             check(b.locator(".day-pill").count() == rows_a, f"the leader sees the same services as the pastor ({rows_a})")
 
-            # 3. A change on the phone shows up live on the pastor's screen
-            b.locator(".day-card").tap()
-            b.fill('dialog input[name="sermon-title"]', "Live From The Phone")
-            b.click('dialog .dialog-actions button[value="save"]')
-            a.click('[data-tab="preaching"]')
-            a.wait_for_selector(".folio:has-text('Live From The Phone')", timeout=20000)
-            check(True, "an edit on the phone appears live on the desktop")
+            # 3. A member can look but not edit, and an admin's change reaches their phone live
+            check(b.locator("div.day-card").count() == 1 and b.locator("button.slot, .assign").count() == 0, "a member has nothing to edit")
+            a.locator(".matrix tbody .when").first.click()
+            a.fill('dialog input[name="sermon-title"]', "Live From The Pastor")
+            a.click('dialog .dialog-actions button[value="save"]')
+            b.click('[data-tab="preaching"]')
+            b.wait_for_selector(".folio:has-text('Live From The Pastor')", timeout=20000)
+            check(True, "an edit on the desktop appears live on the phone")
 
             # 4. ...and the pastor's edit reaches the phone
             a.click('[data-tab="ministers"]')
@@ -190,11 +191,11 @@ try:
             b.wait_for_selector(".person:has-text('Synced Person')", timeout=20000)
             check(True, "a new minister added on the desktop reaches the phone")
 
-            # 5. Members list shows both; leader is an editor
+            # 5. Members list shows both; leader is a plain member
             a.click("#account-btn")
             a.wait_for_selector("dialog[open] .members li:nth-child(2)", timeout=20000)
             members = a.inner_text("dialog .members").lower()
-            check("editor" in members and "leader" in members, "the pastor sees the leader as an editor")
+            check("member" in members and "leader" in members, "the pastor sees the leader as a member")
             a.click('dialog .dialog-actions button[value="cancel"]')
 
             # 5b. The admin opening their own invite link stays admin
@@ -211,10 +212,6 @@ try:
             a.locator("dialog .members li", has_text="leader").locator("[data-remove-member]").click()
             a.wait_for_function("document.querySelectorAll('dialog .members li').length === 1", timeout=20000)
             a.click('dialog .dialog-actions button[value="cancel"]')
-            b.click('[data-tab="schedule"]')
-            b.locator(".day-card").tap()
-            b.fill('dialog input[name="sermon-title"]', "After Removal")
-            b.click('dialog .dialog-actions button[value="save"]')
             b.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'synced'", timeout=25000)
             check(True, "a removed member's app falls back to the browser's own copy")
             b.goto(invite)

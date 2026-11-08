@@ -4,6 +4,7 @@
 // Store interface (all async):
 //   load()                    -> full state { settings, roles, people, series, services, tasks }
 //   putDoc(collection, doc)   -> insert or replace one doc by doc.id
+//   patchDoc(collection, id, fields) -> change only these fields of one doc
 //   deleteDoc(collection, id) -> remove one doc
 //   putSettings(settings)     -> replace the settings object
 //   replaceAll(state)         -> overwrite everything (import / reset)
@@ -51,6 +52,13 @@ export class LocalStore {
     const list = this.state[collection];
     const i = list.findIndex(d => d.id === doc.id);
     if (i >= 0) list[i] = structuredClone(doc); else list.push(structuredClone(doc));
+    return this._persist();
+  }
+
+  async patchDoc(collection, id, fields) {
+    this._check(collection);
+    const doc = this.state[collection].find(d => d.id === id);
+    if (doc) Object.assign(doc, structuredClone(fields));
     return this._persist();
   }
 

@@ -14,8 +14,10 @@ sees changes live. The views don't know which store they're using.
 2. They **copy the invite link** (`…#join=<churchId>`) from the same dialog and send it to
    the team.
 3. **Each team member** opens the link, signs in, and lands in the same church as an
-   **editor**. Editors can change the schedule, sermons, people, series and settings.
-   Only the admin can remove members.
+   **member** (stored as `editor`). Members can see everything. Only **admins** can change
+   the schedule, ministers, series, tasks, roles and settings, or remove members. An admin
+   can make someone else an admin from the account sheet. A member assigned to preach a
+   service can edit that service's sermon: title, scripture and series.
 4. **Signing out** returns that browser to its own local copy. The church stays online.
 
 Anyone holding the invite link can join, so it should only go to the ministry team.
@@ -32,7 +34,9 @@ churches/{churchId}/services/{serviceId} { date, time, name, assignments{}, serm
 churches/{churchId}/tasks/{taskId}       { week, title, assignees[], notes, done }
 ```
 
-**A new collection's rule goes live before its code.** The app reads every collection when a church opens, and treats "permission denied" as "you were removed", which signs that person out of their church. So run `firebase deploy --only firestore:rules` first, then push. Pushing to `main` deploys GitHub Pages straight away.
+**A new collection's rule goes live before its code.** The app reads every collection when a church opens, and treats a refused *read* as "you were removed", which signs that person out of their church. So run `firebase deploy --only firestore:rules` first, then push. Pushing to `main` deploys GitHub Pages straight away.
+
+**Tightening who can write goes the other way: code first, then rules.** A refused *write* now only shows a message, but versions before this change treated it as "you were removed" too. A browser still running one would be dropped from the church.
 
 ## Store methods → Firestore
 
@@ -40,23 +44,29 @@ churches/{churchId}/tasks/{taskId}       { week, title, assignees[], notes, done
 |---|---|
 | `load()` | `getDoc` on the church + `getDocs` on the 4 collections |
 | `putDoc(col, doc)` | `setDoc`, without waiting for the server |
+| `patchDoc(col, id, fields)` | `updateDoc` on only those fields, without waiting |
 | `deleteDoc(col, id)` | `deleteDoc`, without waiting |
 | `putSettings(s)` | `updateDoc(church, { settings, name })` |
 | `replaceAll(state)` | `writeBatch` (450 ops a batch): set everything, delete what's gone |
 | `subscribe(cb)` | `onSnapshot` on the church + 4 collections; calls back once all 5 have arrived |
 
 Writes are not awaited. Firestore shows them on screen at once and queues them while
-offline (persistent cache). A refused write goes to `onError`, which shows a toast.
+offline (persistent cache). A refused write goes to `onError` marked `'write'`, which shows a toast.
+Only a refused read means you were removed.
 
 ## Security rules
 
 [firestore.rules](../firestore.rules):
-- **Members** read and write the church's five collections, and may update its settings.
-- **The admin** is the only one who can change `members`.
+- **Members** read the church's five collections.
+- **Admins** are the only ones who write them, or change the settings or `members`.
+- **A preacher** may change only `sermon` on a service where `assignments.preacher` (its first three places) is them.
+- **Your own minister**: you may change its `name` and `photo`. An invite can link you to a minister nobody has claimed, unless someone else's email is on it.
 - **A non-member** may make one change only: adding *their own* uid as `editor`. That is the invite join.
 - **`users/{uid}`** is readable and writable only by that user.
 
-`tests/cloud_e2e.py` checks that an outsider is refused.
+Members can't forge their way past this, with one known limit: being "them" is judged by the linked account or the sign-in email, and email sign-ups aren't verified. Someone already in the church could sign up with a preacher's email, or claim an unlinked minister with no email on file, and edit that minister's sermons, name and photo. It goes no further than that.
+
+`tests/cloud_e2e.py` checks that an outsider is refused, and tries each of these writes as a plain member and as a preacher.
 
 ## Testing without touching the real project
 

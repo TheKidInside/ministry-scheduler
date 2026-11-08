@@ -237,6 +237,7 @@ select {
   background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%235b6070' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center / 12px;
 }
 input[type="color"] { padding: 3px; width: 54px; flex: none; }
+input[type="checkbox"]:disabled { opacity: .55; }
 input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; min-height: 0; margin: 0; padding: 0; accent-color: var(--primary); flex: none; }
 .inline-field { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
 .inline-field select, .inline-field input { width: auto; }
@@ -402,9 +403,10 @@ tbody tr[data-action]:hover > * { background: var(--surface-2); }
 .folio-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 14px; }
 .folio {
   display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 20px; border-radius: var(--radius); border: 1px solid var(--line);
-  background: var(--surface); cursor: pointer; transition: border-color .2s var(--ease);
+  background: var(--surface); transition: border-color .2s var(--ease);
 }
-.folio:hover { border-color: var(--line-strong); }
+.folio[data-action] { cursor: pointer; }
+.folio[data-action]:hover { border-color: var(--line-strong); }
 .folio.today { border-color: var(--gold); }
 .folio-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .folio-date { font-size: 13px; font-weight: 600; white-space: nowrap; }
@@ -429,7 +431,8 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
 .directory-head { padding-block: 13px; background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .person { width: 100%; min-height: 60px; border: 0; border-bottom: 1px solid var(--line-soft); background: none; text-align: left; }
 .person:last-of-type { border-bottom: 0; }
-.person:hover { background: var(--surface-2); }
+button.person { cursor: pointer; }
+button.person:hover { background: var(--surface-2); }
 .person-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .person-id .mono { width: 32px; height: 32px; }
 .person-text { display: grid; min-width: 0; }
@@ -620,7 +623,7 @@ dialog.assign-sheet .dialog-body { background: var(--bg); }
 .task:last-child { border-bottom: 0; }
 .task-check { flex: none; display: grid; place-items: center; width: 48px; cursor: pointer; }
 .task-main { flex: 1; min-width: 0; display: grid; gap: 4px; padding: 10px 14px 10px 0; border: 0; background: none; text-align: left; }
-.task-main:hover { background: var(--surface-2); }
+button.task-main:hover { background: var(--surface-2); }
 .task-title { font-weight: 600; overflow-wrap: anywhere; }
 .task-notes { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .task .cell { flex-direction: row; flex-wrap: wrap; gap: 4px 12px; }
@@ -669,8 +672,10 @@ dialog.assign-sheet .dialog-body { background: var(--bg); }
 /* ---------- phones ---------- */
 @media (max-width: 760px) {
   /* Phone shell: the page never scrolls or bounces; the header stays put and only .main scrolls,
-     so a swipe can't drag the screen out of view or trigger swipe-back. */
-  body { display: flex; flex-direction: column; position: fixed; inset: 0; overflow: hidden; }
+     so a swipe can't drag the screen out of view or trigger swipe-back. min-height is cleared
+     because phone browsers make 100vh taller than the visible screen, which would push the end
+     of every page down behind the tab bar. */
+  body { display: flex; flex-direction: column; position: fixed; inset: 0; overflow: hidden; min-height: 0; }
   .main { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: clip; overscroll-behavior: none;
           touch-action: pan-y; padding-bottom: calc(66px + env(safe-area-inset-bottom)); }
   input, select, textarea { font-size: 16px; }
@@ -761,10 +766,10 @@ dialog.assign-sheet .dialog-body { background: var(--bg); }
 
   /* the editor becomes a bottom sheet; choosing a person takes the whole screen */
   dialog, dialog.wide { margin: auto 0 0; width: 100%; max-width: 100%; height: auto; max-height: 92vh; max-height: 92dvh; border-left: 0; border-radius: 18px 18px 0 0; }
-  dialog.assign-sheet { height: 100%; max-height: 100%; border-radius: 0; }
+  dialog.assign-sheet { height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh; border-radius: 0; }
   dialog[open] { animation: sheet-up .32s var(--ease); }
   .dialog-form { max-height: 92vh; max-height: 92dvh; }
-  dialog.assign-sheet .dialog-form { max-height: 100%; }
+  dialog.assign-sheet .dialog-form { height: 100%; max-height: 100%; }
   .dialog-head, .dialog-body, .assign-find { padding-left: 16px; padding-right: 16px; }
   .dialog-head.back-head { padding-left: 8px; }
   .dialog-actions { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }

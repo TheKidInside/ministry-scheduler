@@ -25,6 +25,12 @@ PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4
 FORGE = """async ([cid, uid, field]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
   try { await F.updateDoc(F.doc(db, 'churches', cid), { [`${field}.${uid}`]: 'data:image/jpeg;base64,AAAA' }); return 'allowed'; }
   catch (e) { return e.code; } }"""
+TRY = """async ([cid, col, id, fields]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+  try { await F.updateDoc(F.doc(db, 'churches', cid, col, id), fields); return 'allowed'; } catch (e) { return e.code; } }"""
+SETTINGS = """async cid => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+  try { await F.updateDoc(F.doc(db, 'churches', cid), { 'settings.churchName': 'Hacked' }); return 'allowed'; } catch (e) { return e.code; } }"""
+FIRST_DOC = """async ([cid, col]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+  const s = await F.getDocs(F.collection(db, 'churches', cid, col)); return s.docs[0].id; }"""
 sys.stdout.reconfigure(encoding="utf-8")
 
 
@@ -96,12 +102,22 @@ with sync_playwright() as p:
     b.wait_for_selector(".day-pill")
     check(b.locator(".day-pill").count() == rows_a, "the leader sees the same services as the pastor")
 
-    # 3. A change on the phone shows up live on the pastor's screen
-    b.locator(".day-card").tap()
-    b.fill('dialog input[name="sermon-title"]', "Live From The Phone")
-    b.click('dialog .dialog-actions button[value="save"]')
-    a.click('[data-tab="preaching"]')
-    a.wait_for_selector(".folio:has-text('Live From The Phone')", timeout=15000)
+    # 3. A member who isn't an admin can look but has nothing to change
+    check(b.locator("div.day-card").count() == 1 and b.locator("button.slot, .assign").count() == 0, "a member sees the service with nothing to edit")
+    check(b.locator('[data-action="autofill-month"], [data-action="new-service"]').count() == 0, "a member has no schedule buttons")
+    for tab, gone in [("preaching", ".folio[data-action]"), ("tasks", '[data-action="new-task"], [data-action="edit-task"]'),
+                      ("ministers", '[data-action="new-person"], [data-action="edit-person"]'), ("series", '[data-action="new-series"], [data-action="edit-series"]'),
+                      ("settings", "#settings-form, #roles-form, #import-file, [data-action='clear-all']")]:
+        b.click(f'[data-tab="{tab}"]')
+        check(b.locator(gone).count() == 0, f"{tab}: a member can't edit")
+    b.click('[data-tab="schedule"]')
+
+    # 3b. An admin's change shows up live on the phone
+    a.locator(".matrix tbody .when").first.click()
+    a.fill('dialog input[name="sermon-title"]', "Live From The Pastor")
+    a.click('dialog .dialog-actions button[value="save"]')
+    b.click('[data-tab="preaching"]')
+    b.wait_for_selector(".folio:has-text('Live From The Pastor')", timeout=15000)
     check(True, "an edit on one device appears live on the other")
 
     # 4. ...and the pastor's edit reaches the phone
@@ -164,10 +180,49 @@ with sync_playwright() as p:
     b.wait_for_selector("#mine-btn .bell-count", state="hidden", timeout=5000)
     b.click('[data-tab="tasks"]')
     b.click('[data-action="next"]')
-    b.locator(".task", has_text="Bring the new cables").locator(".task-check input").click()
-    a.wait_for_selector(".task.done:has-text('Bring the new cables')", timeout=15000)
-    check(True, "ticking a task on the phone shows as done on the other device")
+    check(b.locator(".task", has_text="Bring the new cables").locator(".task-check input").is_disabled(), "a member can't tick a task")
+    a.locator(".task", has_text="Bring the new cables").locator(".task-check input").click()
+    b.wait_for_selector(".task.done:has-text('Bring the new cables')", timeout=15000)
+    check(True, "an admin ticking a task shows as done on the other device")
     b.click('[data-action="prev"]')
+
+    # 4b3. A preacher edits the sermons they are assigned, and only those
+    cid_now = invite.split("#join=")[1]
+    a.click('[data-tab="schedule"]')
+    a.locator(".matrix tbody .when").first.click()
+    a.wait_for_selector("dialog[open]")
+    a.select_option('dialog select[name="role:preacher"]', label="Synced Person")
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .notify-list", timeout=5000)
+    a.click('dialog .dialog-actions button[value="cancel"]')
+    a.click('[data-tab="preaching"]')
+    b.click('[data-tab="preaching"]')
+    b.click('[data-action="next"]')
+    b.wait_for_selector(".folio[data-action='edit-sermon']", timeout=15000)
+    check(b.locator(".folio[data-action]").count() == 1, "a preacher can open only the sermon assigned to them")
+    b.locator(".folio[data-action='edit-sermon']").tap()
+    b.wait_for_selector("dialog[open] input[name='sermon-title']")
+    check(b.locator('dialog select[name^="role:"], dialog input[name="date"]').count() == 0, "the preacher's sheet has only the sermon")
+    b.fill("dialog input[name='sermon-title']", "Live From The Phone")
+    b.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector(".folio:has-text('Live From The Phone')", timeout=15000)
+    check(True, "a preacher's edit appears live")
+    mine = b.evaluate("() => document.querySelector(\".folio[data-action='edit-sermon']\").dataset.id")
+    sermon = {"title": "Forged", "scripture": "", "seriesId": ""}
+    check(b.evaluate(TRY, [cid_now, "services", mine, {"sermon": sermon}]) == "allowed", "the rules let a preacher save their own sermon")
+    check(b.evaluate(TRY, [cid_now, "services", mine, {"assignments": {}}]) == "permission-denied", "the rules refuse a preacher changing who serves")
+    check(b.evaluate(TRY, [cid_now, "services", mine, {"sermon": sermon, "notes": "x"}]) == "permission-denied", "the rules refuse a preacher slipping in another field")
+    someone_elses = a.evaluate("""async ([cid, mine]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+      const s = await F.getDocs(F.collection(db, 'churches', cid, 'services')); return s.docs.map(d => d.id).find(id => id !== mine); }""", [cid_now, mine])
+    check(b.evaluate(TRY, [cid_now, "services", someone_elses, {"sermon": sermon}]) == "permission-denied", "the rules refuse a preacher editing someone else's sermon")
+    for col in ("people", "series", "tasks", "roles"):
+        doc = b.evaluate(FIRST_DOC, [cid_now, col])
+        check(b.evaluate(TRY, [cid_now, col, doc, {"name": "Forged"}]) == "permission-denied", f"the rules refuse a member changing {col}")
+    check(b.evaluate(SETTINGS, cid_now) == "permission-denied", "the rules refuse a member changing the church settings")
+    check(b.get_attribute("#account-btn", "data-state") == "synced", "a refused save never drops you out of the church")
+    b.click('[data-action="prev"]')
+    a.click('[data-tab="schedule"]')
+    a.click('[data-action="prev"]')
 
     # 4c. "Send an invite": the link carries the minister, and accepting it links their account
     a.click('[data-tab="ministers"]')
@@ -210,7 +265,6 @@ with sync_playwright() as p:
     c.wait_for_function("document.querySelector('dialog .members').textContent.includes('Renamed Person')", timeout=15000)
     check(True, "the members list shows the new name")
     c.click('dialog .dialog-actions button[value="cancel"]')
-    cid_now = invite.split("#join=")[1]
     pastor = a.evaluate("async () => { const C = await import('/js/cloud.js'); return (await C.cloud()).auth.currentUser.uid; }")
     for field in ("memberPhotos", "memberNames"):
         check(c.evaluate(FORGE, [cid_now, pastor, field]) == "permission-denied", f"a member can't change someone else's {field}")
@@ -238,7 +292,7 @@ with sync_playwright() as p:
     a.click("#account-btn")
     a.wait_for_selector("dialog[open] .members li:nth-child(3)", timeout=15000)
     members = a.inner_text("dialog .members").lower()
-    check("editor" in members and "leader" in members, "the pastor sees the leader as an editor")
+    check("member" in members and "leader" in members, "the pastor sees the leader as a member")
     a.click('dialog .dialog-actions button[value="cancel"]')
 
     # 5b. The admin opening their own invite link stays admin
@@ -263,10 +317,6 @@ with sync_playwright() as p:
     left = a.evaluate("async cid => { const C = await import('/js/cloud.js'); const i = await C.churchInfo(cid); return [Object.keys(i.members).length, Object.keys(i.memberPhotos).length]; }", cid_now)
     check(left == [1, 0], f"leaving removes your name and photo from the church {left}")
     c.context.close()
-    b.click('[data-tab="schedule"]')
-    b.locator(".day-card").tap()
-    b.fill('dialog input[name="sermon-title"]', "After Removal")
-    b.click('dialog .dialog-actions button[value="save"]')
     b.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'synced'", timeout=20000)
     check(True, "a removed member's app falls back to the browser's own copy")
     b.goto(invite)

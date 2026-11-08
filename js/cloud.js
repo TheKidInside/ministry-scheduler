@@ -136,7 +136,7 @@ export async function createChurch(user, state) {
   return ref.id;
 }
 
-// Accept an invite link: add yourself as an editor. Rules only allow adding your own uid,
+// Accept an invite link: add yourself as an editor (the app shows this as "Member"). Rules only allow adding your own uid,
 // and refuse anyone an admin removed.
 export async function joinChurch(user, churchId) {
   const { db, F } = await cloud();
@@ -226,7 +226,7 @@ export class FirebaseStore {
   _col(F, db, name) { return F.collection(db, 'churches', this.churchId, name); }
 
   _send(promise) {
-    promise.catch(err => this.onError(err));
+    promise.catch(err => this.onError(err, 'write'));
     return true;
   }
 
@@ -245,6 +245,12 @@ export class FirebaseStore {
   async putDoc(collection, doc) {
     const { db, F } = await cloud();
     return this._send(F.setDoc(F.doc(this._col(F, db, collection), doc.id), doc));
+  }
+
+  // Only these fields, so a preacher's save touches nothing the rules keep for admins.
+  async patchDoc(collection, id, fields) {
+    const { db, F } = await cloud();
+    return this._send(F.updateDoc(F.doc(this._col(F, db, collection), id), fields));
   }
 
   async deleteDoc(collection, id) {
@@ -300,6 +306,7 @@ export class FirebaseStore {
       };
       stop.push(F.onSnapshot(F.doc(db, 'churches', this.churchId), snap => {
         parts.settings = snap.exists() ? snap.data().settings || {} : {};
+        this.members = snap.exists() ? snap.data().members || {} : {};
         ready.add('church');
         emit();
       }, err => this.onError(err)));

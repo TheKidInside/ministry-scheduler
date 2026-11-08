@@ -452,6 +452,10 @@ with sync_playwright() as p:
         check(page.evaluate(DRAG, ".rail") and page.evaluate(DRAG, ".tabs"), f"{tab}: the header and tab bar can't be dragged")
         more = page.evaluate("(m => m.scrollHeight > m.clientHeight)(document.querySelector('.main'))")
         check(page.evaluate(DRAG, ".view") != more, f"{tab}: the page scrolls only when there is more to see")
+        cut = page.evaluate('''() => { const m = document.querySelector('.main'); m.scrollTo(0, 1e6);
+          const last = Math.max(...[...document.querySelectorAll('.view *')].map(e => e.getBoundingClientRect().bottom));
+          const top = document.querySelector('.tabs').getBoundingClientRect().top; m.scrollTo(0, 0); return last - top; }''')
+        check(cut <= 0 and page.evaluate("getComputedStyle(document.body).minHeight") == "0px", f"{tab}: the tab bar never covers the end of the page ({cut:.0f}px)")
         shot(page, f"audit-{tab}")
     page.locator('[data-tab="tasks"]').tap()
     page.locator('[data-action="new-task"]').first.tap()

@@ -44,6 +44,14 @@ async function putDoc(collection, doc) {
   afterWrite(await store.putDoc(collection, doc));
 }
 
+// Changes only these fields, here and in the store.
+async function patchDoc(collection, id, fields) {
+  const list = state[collection];
+  const i = list.findIndex(d => d.id === id);
+  if (i >= 0) list[i] = { ...list[i], ...fields };
+  afterWrite(await store.patchDoc(collection, id, fields));
+}
+
 async function deleteDoc(collection, id) {
   state[collection] = state[collection].filter(d => d.id !== id);
   afterWrite(await store.deleteDoc(collection, id));
@@ -111,10 +119,10 @@ function pageActions() {
   const hasServices = M.servicesInMonth(state.services, view.y, view.m).length > 0;
   switch (view.tab) {
     case 'schedule': return hasServices
-      ? act('copy-roster', 'copy', 'Copy as text') + act('print', 'print', 'Print', 'hide-phone') + act('autofill-month', 'spark', 'Auto-fill open slots', 'primary') : '';
+      ? act('copy-roster', 'copy', 'Copy as text') + act('print', 'print', 'Print', 'hide-phone') + (canManage() ? act('autofill-month', 'spark', 'Auto-fill open slots', 'primary') : '') : '';
     case 'preaching': return hasServices ? act('print', 'print', 'Print preaching plan', 'primary') : '';
-    case 'ministers': return act('new-person', 'plus', 'Add minister', 'primary gold');
-    case 'series': return act('new-series', 'plus', 'New series', 'primary gold');
+    case 'ministers': return canManage() ? act('new-person', 'plus', 'Add minister', 'primary gold') : '';
+    case 'series': return canManage() ? act('new-series', 'plus', 'New series', 'primary gold') : '';
     default: return '';
   }
 }
@@ -160,7 +168,8 @@ function render() {
   $('#month-nav').hidden = !monthTab;
   const sub = $('#page-sub');
   sub.hidden = view.tab !== 'settings';
-  sub.textContent = isCloud() ? 'Changes save automatically and are shared with your church.' : 'Changes save automatically in this browser.';
+  sub.textContent = !canManage() ? 'Only an admin can change your church\'s settings.'
+    : isCloud() ? 'Changes save automatically and are shared with your church.' : 'Changes save automatically in this browser.';
   $('#page-actions').innerHTML = pageActions();
   $('#head-extra').innerHTML = phoneWidth.matches ? phoneHeads[view.tab]?.() || '' : '';
   for (const a of $$('[data-tab]')) a.setAttribute('aria-current', a.dataset.tab === view.tab ? 'page' : 'false');
@@ -213,6 +222,14 @@ function highlightField() {
 
 const assignButton = (svc, roleId, slot, label = 'Assign') => `<button class="assign" data-action="assign" data-id="${esc(svc.id)}" data-role="${esc(roleId)}" data-slot="${slot}">${ICONS.plus}${esc(label)}</button>`;
 
+// What tapping a service does: admins edit all of it, its preacher edits the sermon, others just read.
+function serviceAction(svc) {
+  const action = canManage() ? 'edit-service' : preachesOn(svc) ? 'edit-sermon' : '';
+  return action ? `data-action="${action}" data-id="${esc(svc.id)}" tabindex="0"` : '';
+}
+
+const openTag = '<span class="need">Open</span>';
+
 const pickedService = list => list.find(s => s.id === view.day) || list.find(s => s.date >= M.todayISO()) || list[0];
 
 // Schedule: one row per service, one column per role. A phone shows one service at a time.
@@ -222,11 +239,13 @@ function renderSchedule() {
   if (view.announce) return `<div class="toolbar">${modes}</div>${renderAnnouncement()}`;
   const list = M.servicesInMonth(state.services, view.y, view.m);
   const day = M.WEEKDAYS[Number(state.settings.defaultDay) || 0];
-  const addButtons = primary => `<button class="btn${primary ? ' primary' : ''}" data-action="fill-month">Add every ${esc(day)}</button>
-        <button class="btn" data-action="new-service">Add a service</button>`;
+  const admin = canManage();
+  const addButtons = primary => (admin ? `<button class="btn${primary ? ' primary' : ''}" data-action="fill-month">Add every ${esc(day)}</button>
+        <button class="btn" data-action="new-service">Add a service</button>` : '');
   if (!list.length) {
-    return `<div class="toolbar">${modes}</div>` + emptyState('No services this month',
-      `Add every ${day} in one click, or add a single service for a special date.`, `<div class="row-actions">${addButtons(true)}</div>`);
+    return `<div class="toolbar">${modes}</div>` + (admin
+      ? emptyState('No services this month', `Add every ${day} in one click, or add a single service for a special date.`, `<div class="row-actions">${addButtons(true)}</div>`)
+      : emptyState('No services this month', 'Your admin hasn\'t added any services for this month yet.'));
   }
   if (phoneWidth.matches) return renderDay(pickedService(list), modes, addButtons(false));
 
@@ -236,7 +255,7 @@ function renderSchedule() {
   const stats = `<section class="stats" aria-label="This month at a glance">
     ${stat('Services this month', summary.services)}${stat('Roles filled', summary.filled, '', summary.total)}${stat('Open slots', summary.open, 'amber')}${stat('Clashes', summary.clashes.length, 'red')}
   </section>`;
-  const alert = summary.clashes.length ? `<section class="alert">${ICONS.warn}<div>
+  const alert = admin && summary.clashes.length ? `<section class="alert">${ICONS.warn}<div>
       <strong>${summary.clashes.length === 1 ? '1 clash needs' : `${summary.clashes.length} clashes need`} sorting out</strong>
       <ul>${summary.clashes.map(({ service, clash }) => `<li><button class="alert-line" data-action="edit-service" data-id="${esc(service.id)}">${esc(M.clashSentence(state, service, clash))}</button></li>`).join('')}</ul>
     </div></section>` : '';
@@ -260,12 +279,12 @@ function renderSchedule() {
         if (clash) return `<span class="chip conflict${id === view.focus ? ' focus' : ''}">${esc(personName(id))}<small>${esc(M.clashNote(state, svc, clash))}</small></span>`;
         return `<span class="chip${id === view.focus ? ' focus' : ''}">${esc(personName(id))}</span>`;
       }).join('');
-      return `<td data-label="${esc(role.name)}"><div class="cell">${names}${open ? assignButton(svc, role.id, ids.length, open > 1 ? `Assign ${open}` : 'Assign') : ''}</div></td>`;
+      return `<td data-label="${esc(role.name)}"><div class="cell">${names}${open ? (admin ? assignButton(svc, role.id, ids.length, open > 1 ? `Assign ${open}` : 'Assign') : openTag) : ''}</div></td>`;
     }).join('');
     const series = seriesById(svc.sermon?.seriesId);
     const passage = M.shortScripture(series?.name, svc.sermon?.scripture);
     const usual = svc.time === state.settings.defaultTime && svc.name === state.settings.serviceName;
-    return `<tr class="${svc.id === thisWeekId ? 'this-week' : ''}" data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0">
+    return `<tr class="${svc.id === thisWeekId ? 'this-week' : ''}" ${serviceAction(svc)}>
       <th scope="row" class="when"><div class="when-inner">
         <span class="when-date">${esc(M.shortDate(svc.date))}${svc.id === thisWeekId ? '<span class="week-pill">This week</span>' : ''}</span>
         ${series || passage ? `<span class="when-meta"><span class="series-tag" style="--series:${esc(series?.color || 'var(--line-strong)')}">${esc([series?.name, passage].filter(Boolean).join(' · '))}</span></span>` : ''}
@@ -280,6 +299,9 @@ function renderSchedule() {
 // One service on a phone, grouped the way the team thinks of it.
 function renderDay(svc, modes, addButtons) {
   const { open, clashes } = M.serviceSummary(state, svc);
+  const admin = canManage();
+  const action = serviceAction(svc);
+  const cardTag = action ? 'button' : 'div';
   const parts = [clashes.length && `${clashes.length} clash${clashes.length === 1 ? '' : 'es'}`, open && `${open} open`].filter(Boolean);
   const series = seriesById(svc.sermon?.seriesId);
   const preachers = M.assigned(svc, M.PREACHER_ROLE).filter(Boolean).map(personName).join(', ') || 'Not yet assigned';
@@ -293,26 +315,27 @@ function renderDay(svc, modes, addButtons) {
           const id = ids[i];
           const clash = id && clashes.find(c => c.roleId === role.id && c.personId === id);
           const who = id ? `<span class="slot-who"><span class="slot-name">${esc(personName(id))}${clash ? `<small>${esc(M.clashNote(state, svc, clash))}</small>` : ''}</span>${avatar(personName(id), personPhoto(id))}</span>`
-            : `<span class="assign">${ICONS.plus}Assign</span>`;
-          return `<button class="slot${clash ? ' conflict' : ''}" data-action="assign" data-id="${esc(svc.id)}" data-role="${esc(role.id)}" data-slot="${id ? i : ids.length}" aria-label="${esc(role.name)}: ${esc(id ? personName(id) : 'open')}">
-            <span class="slot-role">${i ? '' : esc(role.name)}</span>${who}</button>`;
+            : admin ? `<span class="assign">${ICONS.plus}Assign</span>` : openTag;
+          const inner = `<span class="slot-role">${i ? '' : esc(role.name)}</span>${who}`;
+          if (!admin) return `<div class="slot${clash ? ' conflict' : ''}">${inner}</div>`;
+          return `<button class="slot${clash ? ' conflict' : ''}" data-action="assign" data-id="${esc(svc.id)}" data-role="${esc(role.id)}" data-slot="${id ? i : ids.length}" aria-label="${esc(role.name)}: ${esc(id ? personName(id) : 'open')}">${inner}</button>`;
         }).join('');
       }).join('')}</div>
     </section>`).join('');
   const songs = svc.setlist?.length
     ? svc.setlist.map((song, i) => `<div class="song"><span class="song-n">${i + 1}</span><span class="song-title">${esc(song.title)}</span>${song.key ? `<span class="song-key">${esc(song.key)}</span>` : ''}</div>`).join('')
-    : `<div class="no-songs"><span>No songs added yet</span><button class="btn small" data-action="edit-service" data-id="${esc(svc.id)}">Add songs</button></div>`;
+    : `<div class="no-songs"><span>No songs added yet</span>${admin ? `<button class="btn small" data-action="edit-service" data-id="${esc(svc.id)}">Add songs</button>` : ''}</div>`;
   const when = M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '');
   return `<div class="toolbar">${modes}</div>
     <div class="day-view">
-      <button class="day-card" data-action="edit-service" data-id="${esc(svc.id)}" aria-label="Edit ${esc(when)}">
+      <${cardTag} class="day-card" ${action}${action ? ` aria-label="Edit ${esc(when)}"` : ''}>
         <span class="day-top"><span>${esc(when)}</span><span class="status${clashes.length ? ' bad' : open ? ' warn' : ''}">${esc(parts.join(' · ') || 'Fully rostered')}</span></span>
         <span><span class="day-title">${esc(title)}</span>
         <span class="day-sub">${passage ? `${esc(passage)} · ` : ''}Preacher: ${esc(preachers)}</span></span>
-      </button>
+      </${cardTag}>
       ${groups}
       <section class="group"><h2 class="group-label">Setlist</h2><div class="group-card">${songs}</div></section>
-      <div class="day-foot">${addButtons}</div>
+      ${addButtons ? `<div class="day-foot">${addButtons}</div>` : ''}
     </div>`;
 }
 
@@ -363,13 +386,14 @@ function renderPreaching() {
     const part = M.seriesPart(state.services, svc);
     const preachers = M.assigned(svc, M.PREACHER_ROLE).filter(Boolean);
     const who = preachers.map(id => `<span class="preacher">${avatar(personName(id), personPhoto(id))}${esc(personName(id))}</span>`).join('');
-    return `<article class="folio${svc.date === today ? ' today' : ''}" data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0" style="--series:${esc(series?.color || 'var(--muted)')}">
+    const action = serviceAction(svc);
+    return `<article class="folio${svc.date === today ? ' today' : ''}" ${action} style="--series:${esc(series?.color || 'var(--muted)')}">
       <header class="folio-top"><span class="folio-date">${esc(M.shortDate(svc.date))}</span>
         <span class="folio-part">${series ? `${esc(series.name)} · Part ${part.n}` : 'Stand-alone'}</span></header>
       <h3 class="folio-title">${esc(svc.sermon?.title) || '<em>Title to come</em>'}</h3>
       <p class="folio-scripture">${esc(svc.sermon?.scripture) || '<em>Scripture to come</em>'}</p>
-      <footer class="folio-foot"><span class="folio-people">${who || assignButton(svc, M.PREACHER_ROLE, 0, 'Assign preacher')}</span>
-        <button class="icon-btn" data-action="edit-service" data-id="${esc(svc.id)}" aria-label="Edit ${esc(M.shortDate(svc.date))}">${ICONS.pencil}</button></footer>
+      <footer class="folio-foot"><span class="folio-people">${who || (canManage() ? assignButton(svc, M.PREACHER_ROLE, 0, 'Assign preacher') : '<span class="need">Preacher open</span>')}</span>
+        ${action ? `<button class="icon-btn" ${action} aria-label="Edit ${esc(M.shortDate(svc.date))}">${ICONS.pencil}</button>` : ''}</footer>
     </article>`;
   };
 
@@ -380,8 +404,9 @@ function renderPreaching() {
     if (!series) return `<div class="ribbon none" style="${span}"><span class="ribbon-name">No series</span><span class="ribbon-meta">${plural(run.items.length, 'sermon')}</span></div>`;
     const a = M.seriesPart(state.services, first.svc);
     const b = M.seriesPart(state.services, run.items[run.items.length - 1].svc);
-    return `<button class="ribbon" data-action="edit-series" data-id="${esc(series.id)}" style="${span};--series:${esc(series.color)}">
-      <span class="ribbon-name">${esc(series.name)}</span><span class="ribbon-meta">${a.n === b.n ? `Part ${a.n} of ${a.of}` : `Parts ${a.n}–${b.n} of ${b.of}`}</span></button>`;
+    const inner = `<span class="ribbon-name">${esc(series.name)}</span><span class="ribbon-meta">${a.n === b.n ? `Part ${a.n} of ${a.of}` : `Parts ${a.n}–${b.n} of ${b.of}`}</span>`;
+    return canManage() ? `<button class="ribbon" data-action="edit-series" data-id="${esc(series.id)}" style="${span};--series:${esc(series.color)}">${inner}</button>`
+      : `<div class="ribbon" style="${span};--series:${esc(series.color)}">${inner}</div>`;
   }).join('');
   const dates = list.map(s => `<span>${esc(M.formatDate(s.date, { day: 'numeric', month: 'short' }))}</span>`).join('');
   const arc = phoneWidth.matches ? '' : `<section class="arc" style="--n:${list.length}" aria-label="Sermons this month by series">
@@ -403,15 +428,16 @@ function renderTasks() {
   const summary = all.length
     ? `${all.filter(t => t.done).length} of ${all.length} done${unassigned ? ` · ${unassigned} unassigned` : ''}`
     : 'No tasks yet this month';
+  const admin = canManage();
   const row = t => {
     const who = t.assignees.map(id => `<span class="chip${id === view.focus ? ' focus' : ''}">${esc(personName(id))}</span>`).join('');
     return `<li class="task${t.done ? ' done' : ''}">
-      <label class="task-check"><input type="checkbox" data-task-done="${esc(t.id)}" ${t.done ? 'checked' : ''} aria-label="${esc(t.title)}: done"></label>
-      <button class="task-main" data-action="edit-task" data-id="${esc(t.id)}">
+      <label class="task-check"><input type="checkbox" data-task-done="${esc(t.id)}" ${t.done ? 'checked' : ''} ${admin ? '' : 'disabled'} aria-label="${esc(t.title)}: done"></label>
+      <${admin ? `button class="task-main" data-action="edit-task" data-id="${esc(t.id)}"` : 'div class="task-main"'}>
         <span class="task-title">${esc(t.title)}</span>
         ${t.notes ? `<span class="task-notes">${esc(t.notes)}</span>` : ''}
         <span class="cell">${who || (t.done ? '' : '<span class="need">Unassigned</span>')}</span>
-      </button></li>`;
+      </${admin ? 'button' : 'div'}></li>`;
   };
   const cards = weeks.map(w => {
     const d = dayParts(w.end);
@@ -425,14 +451,14 @@ function renderTasks() {
           ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
         </span>
         ${w.tasks.length ? `<span class="week-count muted small">${w.tasks.filter(t => t.done).length} of ${w.tasks.length}</span>` : ''}
-        <button class="btn small week-add" data-action="new-task" data-week="${esc(w.end)}">Add a task</button>
+        ${admin ? `<button class="btn small week-add" data-action="new-task" data-week="${esc(w.end)}">Add a task</button>` : ''}
       </header>
       ${w.tasks.length ? `<ul class="task-list">${w.tasks.map(row).join('')}</ul>` : '<p class="week-empty muted">Nothing planned yet.</p>'}
     </section>`;
   }).join('');
   return `<div class="toolbar"><span class="muted">${esc(summary)}</span>${phoneWidth.matches ? '' : highlightField()}</div>
     <div class="week-grid">${cards}</div>
-    <p class="hint">Each week runs up to its ${esc(M.WEEKDAYS[Number(day) || 0])}. Select a task to change it or assign people.</p>`;
+    <p class="hint">Each week runs up to its ${esc(M.WEEKDAYS[Number(day) || 0])}.${admin ? ' Select a task to change it or assign people.' : ''}</p>`;
 }
 
 function ministerFilters() {
@@ -475,7 +501,8 @@ function renderMinisters() {
     const away = ranges.length ? `${M.formatRange(ranges[0])}${ranges.length > 1 ? ` +${ranges.length - 1}` : ''}` : '';
     const roles = state.roles.filter(r => M.canServe(p, r.id)).map(r => r.name);
     const linked = Boolean(p.userId || M.personEmail(p));
-    return `<button class="person" data-action="edit-person" data-id="${esc(p.id)}" data-search="${esc(`${p.name} ${roles.join(' ')}`.toLowerCase())}" data-roles="${esc(p.roleIds.join(' '))}">
+    const admin = canManage();
+    return `<${admin ? `button class="person" data-action="edit-person" data-id="${esc(p.id)}"` : 'div class="person"'} data-search="${esc(`${p.name} ${roles.join(' ')}`.toLowerCase())}" data-roles="${esc(p.roleIds.join(' '))}">
       <span class="person-id">${avatar(p.name, photoOf(p))}<span class="person-text">
         <span class="person-name">${esc(p.name)}</span>
         ${isCloud() ? `<span class="person-link${linked ? ' on' : ''}">${linked ? 'Linked' : 'No sign-in'}</span>` : ''}
@@ -487,8 +514,8 @@ function renderMinisters() {
       <span class="person-load" title="Services in ${esc(M.MONTHS[m - 1])}"><span class="dots${month.busy ? ' busy' : ''}" aria-hidden="true">${month.dots.map(on => `<i class="${on ? 'on' : ''}"></i>`).join('')}</span>
         <span>${month.total ? `${month.load} of ${plural(month.total, 'service')}${month.busy ? ' · busy' : ''}` : 'No services'}</span></span>
       <span class="person-next" title="${esc(next ? next.roles.map(r => r.name).join(', ') : '')}">${next ? esc(M.formatDate(next.service.date, { day: 'numeric', month: 'short' })) : '<span class="muted">None</span>'}</span>
-      <span class="icon-btn" aria-hidden="true">${ICONS.pencil}</span>
-    </button>`;
+      ${admin ? `<span class="icon-btn" aria-hidden="true">${ICONS.pencil}</span>` : '<span></span>'}
+    </${admin ? 'button' : 'div'}>`;
   }).join('');
   return `${phoneWidth.matches ? '<p class="list-count"></p>' : ministerFilters()}
     <div class="directory"><div class="directory-head" aria-hidden="true"><span>Name</span><span>Roles</span><span>Away</span><span>This month</span><span>Next on</span><span></span></div>${rows}<p class="no-match" hidden>Nobody matches that search.</p></div>`;
@@ -508,7 +535,8 @@ function renderSeries() {
       <div class="tl-rows">
         ${line.rows.map(r => {
           const draft = statuses.get(r.series.id) === 'draft';
-          return `<div class="tl-row"><button class="tl-bar${draft ? ' draft' : ''}" data-action="edit-series" data-id="${esc(r.series.id)}" style="left:${r.left.toFixed(2)}%;width:${r.width.toFixed(2)}%;--series:${esc(r.series.color)}">${esc(r.series.name)}${draft ? ' · draft' : ''}</button></div>`;
+          const tag = canManage() ? `button data-action="edit-series" data-id="${esc(r.series.id)}"` : 'div';
+          return `<div class="tl-row"><${tag} class="tl-bar${draft ? ' draft' : ''}" style="left:${r.left.toFixed(2)}%;width:${r.width.toFixed(2)}%;--series:${esc(r.series.color)}">${esc(r.series.name)}${draft ? ' · draft' : ''}</${canManage() ? 'button' : 'div'}></div>`;
         }).join('')}
         <div class="tl-today" style="left:${line.today.toFixed(2)}%"><span>Today</span></div>
       </div>
@@ -521,7 +549,7 @@ function renderSeries() {
       <h2>${esc(s.name)}</h2>
       <p class="series-range">${s.start && s.end ? esc(dateRange(s.start, s.end)) : 'No dates set'}</p>
       ${s.description ? `<p class="series-desc">${esc(s.description)}</p>` : ''}
-      <footer class="series-foot"><span>${plural(count, 'service')} linked</span><button class="btn" data-action="edit-series" data-id="${esc(s.id)}">Edit</button></footer>
+      <footer class="series-foot"><span>${plural(count, 'service')} linked</span>${canManage() ? `<button class="btn" data-action="edit-series" data-id="${esc(s.id)}">Edit</button>` : ''}</footer>
     </article>`;
   }).join('');
   return `${timeline}<section class="series-grid" aria-label="All series">${cards}</section>`;
@@ -539,6 +567,11 @@ function renderSettings() {
   const days = M.WEEKDAYS.map((d, i) => `<option value="${i}" ${Number(s.defaultDay) === i ? 'selected' : ''}>${d}</option>`).join('');
   const theme = currentTheme();
   const themeCard = (v, label) => `<button type="button" class="theme-card" data-action="theme" data-value="${v}" aria-pressed="${theme === v}"><span class="swatch ${v}"></span>${label}</button>`;
+  const themePanel = `<section class="panel">
+      <h2>Theme</h2>
+      <div class="theme-grid" role="group" aria-label="Appearance">${themeCard('light', 'Light')}${themeCard('dark', 'Dark')}${themeCard('system', 'Match device')}</div>
+    </section>`;
+  if (!canManage()) return `<div class="settings">${themePanel}</div>`;
   return `<div class="settings">
     <form class="panel" id="settings-form">
       <h2>Church</h2>
@@ -559,10 +592,7 @@ function renderSettings() {
         <button type="button" class="btn" data-action="add-role">Add role</button>
       </div>
     </form>
-    <section class="panel">
-      <h2>Theme</h2>
-      <div class="theme-grid" role="group" aria-label="Appearance">${themeCard('light', 'Light')}${themeCard('dark', 'Dark')}${themeCard('system', 'Match device')}</div>
-    </section>
+    ${themePanel}
     <section class="panel split">
       <div><h2>Backup</h2>
         <p>${isCloud()
@@ -808,6 +838,33 @@ function openServiceEditor(existing, date) {
       toast('Service saved.');
       // Offer to message whoever was just put on it.
       afterAssigning(isNew ? null : existing, next, true);
+      return false;
+    },
+  });
+}
+
+// ----- a preacher's own sermon -----
+
+function openSermonEditor(svc) {
+  const series = state.series.slice().sort((a, b) => (b.start || '').localeCompare(a.start || ''))
+    .map(s => `<option value="${esc(s.id)}" ${s.id === svc.sermon.seriesId ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  openDialog(dialogHead('Your sermon', M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '')) + `<div class="dialog-body">
+      <label>Title <input name="sermon-title" value="${esc(svc.sermon.title)}" maxlength="120" placeholder="e.g. Rooted in Christ"></label>
+      <label>Scripture <input name="sermon-scripture" value="${esc(svc.sermon.scripture)}" maxlength="120" placeholder="e.g. Colossians 1:15-20"></label>
+      <label>Series <select name="sermon-series"><option value="">No series</option>${series}</select></label>
+    </div>
+    <footer class="dialog-actions">
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save</button>
+    </footer>`, {
+    async onSubmit(form) {
+      await patchDoc('services', svc.id, { sermon: {
+        title: form.elements['sermon-title'].value.trim(),
+        scripture: form.elements['sermon-scripture'].value.trim(),
+        seriesId: form.elements['sermon-series'].value,
+      } });
+      toast('Sermon saved.');
       return false;
     },
   });
@@ -1321,6 +1378,11 @@ const cloudState = { ready: false, user: null, churchId: '', info: null, error: 
 const JOIN_KEY = 'ministry-scheduler:join';
 const inviteLink = (id, personId = '') => `${location.origin}${location.pathname}#join=${id}${personId ? `&as=${personId}` : ''}`;
 const isCloud = () => Boolean(cloudState.churchId);
+// Only admins change a church's data; the rules enforce it, this just hides what they'd refuse.
+// Signed out, it's your own browser's copy, so everything is yours to change.
+const canManage = () => !isCloud() || (cloudState.info?.members || store.members)?.[cloudState.user?.uid] === 'admin';
+// The first three preacher places, the same limit as firestore.rules.
+const preachesOn = svc => Boolean(me()) && M.assigned(svc, M.PREACHER_ROLE).slice(0, 3).includes(me().id);
 let loadSeq = 0;          // each store switch gets a number; a slower, older load is thrown away
 let opening = '';         // church id being opened right now (auth can fire twice)
 let removedNotice = false;
@@ -1343,7 +1405,11 @@ async function useStore(next) {
   unsubscribe();
   store = next;
   state = loaded;
-  unsubscribe = store.subscribe(s => { state = s; if (!dialog().open && !isTyping()) render(); });
+  unsubscribe = store.subscribe(s => {
+    state = s;
+    if (store.members && cloudState.info) cloudState.info.members = store.members; // someone was made admin, live
+    if (!dialog().open && !isTyping()) render();
+  });
   render();
   return true;
 }
@@ -1378,8 +1444,10 @@ async function useChurch(churchId) {
   render();
 }
 
-async function cloudError(err) {
+async function cloudError(err, kind) {
   const denied = /permission-denied/.test(err.code || '');
+  // A refused save only means this isn't yours to change. Being cut off from reading is what means you were removed.
+  if (denied && kind === 'write') { toast('That wasn\'t saved: only an admin can change it.', 'warn'); return; }
   if (denied && isCloud()) {
     // Removed from the church while using it: drop back to this browser's copy, once.
     if (removedNotice) return;
@@ -1447,7 +1515,7 @@ async function claimInvitedPerson(personId) {
   if (!person || !user || !isCloud() || person.userId || (already && already.id !== person.id)) return;
   if (cloudState.info?.members?.[user.uid] === 'admin') return;
   try {
-    await putDoc('people', { ...person, userId: user.uid, email: person.email || M.normEmail(user.email) });
+    await patchDoc('people', person.id, { userId: user.uid, email: person.email || M.normEmail(user.email) });
     render();
   } catch { toast('You joined, but your profile could not be linked. Ask an admin to link it.', 'warn'); }
 }
@@ -1499,7 +1567,7 @@ function membersHtml(info) {
   return Object.entries(info.members).sort((a, b) => (a[1] === 'admin' ? -1 : 0) - (b[1] === 'admin' ? -1 : 0))
     .map(([uid, role]) => `<li>${avatar(info.memberNames[uid] || '?', info.memberPhotos?.[uid])}
       <span class="member-name">${esc(info.memberNames[uid] || 'Member')}${uid === me ? ' <span class="muted">(you)</span>' : ''}</span>
-      <span class="member-role">${role === 'admin' ? 'Admin' : 'Editor'}</span>
+      <span class="member-role">${role === 'admin' ? 'Admin' : 'Member'}</span>
       ${admin && uid !== me && role !== 'admin' ? `<button type="button" class="btn small" data-promote-member="${esc(uid)}">Make admin</button>` : ''}
       ${admin && uid !== me ? `<button type="button" class="btn small danger" data-remove-member="${esc(uid)}">Remove</button>` : ''}</li>`).join('');
 }
@@ -1593,7 +1661,7 @@ function openAccount() {
       </fieldset>
       <p class="lead">Every change is shared live with everyone in this church, and kept on this device for when you are offline.</p>
       <label>Invite link <span class="copy-row"><input id="invite-link" readonly value="${esc(inviteLink(cloudState.churchId))}"><button type="button" class="btn" data-local="copy-invite">Copy</button></span></label>
-      <p class="muted small">Anyone with this link can join and edit the schedule. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
+      <p class="muted small">Anyone with this link can join and see the schedule. Only admins can change it. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
       <fieldset><legend>Members</legend><ul class="members">${membersHtml(cloudState.info)}</ul></fieldset>
       <p class="form-error" aria-live="polite"></p>`;
     actions = `<button type="submit" class="btn ghost" value="signout">Sign out</button>
@@ -1641,7 +1709,7 @@ function openAccount() {
         try {
           if (remove && confirm(`Remove ${names[remove] || 'this member'} from the church? They won't be able to rejoin with the invite link.`)) {
             await C.removeMember(cloudState.churchId, remove);
-          } else if (promote && confirm(`Make ${names[promote] || 'this member'} an admin? Admins can add and remove members.`)) {
+          } else if (promote && confirm(`Make ${names[promote] || 'this member'} an admin? Admins can change the schedule and add or remove members.`)) {
             await C.setRole(cloudState.churchId, promote, 'admin');
           } else return;
           await refresh();
@@ -1663,7 +1731,7 @@ function openAccount() {
             const name = form.elements['profile-name'].value.trim();
             if (!name) return error('Enter your name.');
             const person = me();
-            if (person) await putDoc('people', { ...person, name, photo: profile.photo });
+            if (person) await patchDoc('people', person.id, { name, photo: profile.photo });
             if (cloudState.info) {
               cloudState.info.memberNames[user.uid] = name;
               if (profile.photo) cloudState.info.memberPhotos[user.uid] = profile.photo;
@@ -1942,9 +2010,17 @@ function toast(msg, kind = '') {
 
 // ---------- events ----------
 
+const ADMIN_ACTIONS = new Set(['edit-service', 'new-service', 'fill-month', 'autofill-month', 'assign', 'edit-person', 'new-person',
+  'edit-series', 'new-series', 'edit-task', 'new-task', 'add-role', 'delete-role', 'load-sample', 'clear-all']);
+
 async function handleAction(el) {
   const { action, id } = el.dataset;
+  if (ADMIN_ACTIONS.has(action) && !canManage()) return undefined;
   switch (action) {
+    case 'edit-sermon': {
+      const svc = state.services.find(s => s.id === id);
+      return svc && preachesOn(svc) ? openSermonEditor(svc) : undefined;
+    }
     case 'edit-service': return openServiceEditor(state.services.find(s => s.id === id));
     case 'new-service': {
       const day = M.toISO(view.y, view.m, 1);
