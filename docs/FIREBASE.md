@@ -67,16 +67,13 @@ then drives two browsers, one of them an iPhone profile, through these steps: si
 put the schedule online, invite, join, live edits both ways, members list, reload,
 sign out, and an outsider being refused.
 
-## Setup state
+## The live project
 
-- `js/firebase-config.js` holds the web config. While it is `null`, sync is off.
-- **Firebase Hosting** (`firebase deploy --only hosting,firestore:rules`) serves the app
-  from the same origin as `authDomain`. That way iOS Safari can complete Google
-  sign-in (see the Patch app's history). GitHub Pages keeps working for everything,
-  but Google sign-in on iPhones is more reliable from the Firebase URL.
-- **Google sign-in** has to be switched on once in the Firebase console:
-  Authentication → Sign-in method → Google → Enable. Email/password is switched on by
-  the setup script.
+- **Project:** `ministry-sched-ph` (console: https://console.firebase.google.com/project/ministry-sched-ph). Firestore is in `asia-southeast1` (Singapore), the closest region to the Philippines. The region cannot be changed.
+- **App URLs:** https://ministry-sched-ph.web.app (Firebase Hosting, recommended for phones because its origin matches `authDomain`, so Google sign-in works on iPhones) and https://thekidinside.github.io/ministry-scheduler/ (GitHub Pages, push = deploy).
+- **Sign-in:** email/password and Google, both switched on by `firebase deploy --only auth` (the `auth.providers` block in `firebase.json`). Authorised domains: the two Firebase domains plus `thekidinside.github.io`. `localhost` is not authorised, so test real sign-in on a deployed URL, or use the emulators.
+- **Deploy:** `firebase deploy --only hosting,firestore:rules,auth` from this folder (`.firebaserc` points at the project). GitHub Pages updates on push.
+- `js/firebase-config.js` holds the public web config. Setting it back to `null` switches sync off.
 
 ## Later
 

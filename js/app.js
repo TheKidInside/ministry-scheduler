@@ -881,6 +881,8 @@ function openAccount() {
     body = `
       <p class="lead">${pendingInvite() ? 'Sign in to accept your invite.' : 'Sign in so the pastor, worship leader and tech team all see and edit the same schedule, on any phone or computer.'}</p>
       <button type="submit" class="btn primary wide-btn" value="google">Continue with Google</button>
+      ${location.hostname.endsWith('github.io') && /iPhone|iPad/.test(navigator.userAgent)
+        ? '<p class="muted small">On iPhone, Google sign-in works best at <a href="https://ministry-sched-ph.web.app/">ministry-sched-ph.web.app</a>. Email sign-in works here too.</p>' : ''}
       <div class="or"><span>or use email</span></div>
       <label>Email <input name="email" type="email" autocomplete="email" inputmode="email"></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" minlength="6"></label>
