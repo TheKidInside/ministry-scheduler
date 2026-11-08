@@ -22,6 +22,7 @@ def check(cond, msg):
 def shot(page, name):
     if SHOTS:
         SHOTS.mkdir(parents=True, exist_ok=True)
+        page.wait_for_timeout(700)  # let the view's entrance animation finish
         page.screenshot(path=str(SHOTS / f"{name}.png"), full_page=True)
 
 
@@ -58,11 +59,11 @@ with sync_playwright() as p:
 
     # preaching view shows it on the calendar and in the plan
     page.click('[data-tab="preaching"]')
-    page.wait_for_selector(".calendar .sermon")
-    check(page.locator(".legend-item").count() >= 1, "series legend lists this month's series")
-    check(page.locator(".calendar .sermon", has_text="E2E Sermon Title").count() == 1, "edited title shows on the calendar")
+    page.wait_for_selector(".arc .folio")
+    check(page.locator(".arc .ribbon").count() >= 1, "series ribbons span this month's sermons")
+    check(page.locator(".arc .folio", has_text="E2E Sermon Title").count() == 1, "edited title shows on the calendar")
     check(page.locator(".plan", has_text="John 3:16-17").count() == 1, "scripture shows in the preaching plan")
-    check(page.locator(".sermon-series").first.inner_text().count("/") == 1, "sermons show their part in the series")
+    check(" of " in page.locator(".folio-part").first.inner_text().lower(), "sermons show their part in the series")
     shot(page, "2-preaching")
 
     # conflict warning: put an away person on a service via the select
@@ -136,7 +137,7 @@ with sync_playwright() as p:
     # mobile layout + dark theme
     page.set_viewport_size({"width": 390, "height": 844})
     page.click('[data-tab="preaching"]')
-    check(not page.locator(".calendar").is_visible(), "phone width swaps the calendar for the plan list")
+    check(page.evaluate("getComputedStyle(document.querySelector('.arc')).display") == "block", "phone width stacks the series arc top to bottom")
     sw = page.evaluate("document.documentElement.scrollWidth")
     check(sw <= 390, f"no horizontal scroll on a phone ({sw}px)")
     shot(page, "4-preaching-phone")

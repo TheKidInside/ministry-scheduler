@@ -2,16 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ministry Scheduler</title>
   <meta name="description" content="Schedule ministers, worship, tech and preachers, and plan sermon series by month.">
-  <meta name="theme-color" content="#f5f0e6" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#16130f" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#121729">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500;1,600&family=Hanken+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
   <script>
     // Apply the saved theme before first paint so dark mode never flashes light.
@@ -19,31 +18,52 @@
   </script>
 </head>
 <body>
-  <header class="app-header">
+  <aside class="rail">
     <div class="brand">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="24" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h26M10 2v6M22 2v6M16 15v10M12 19h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      <div>
+      <svg class="mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18.5" fill="none" stroke="currentColor" stroke-width="1"/>
+        <circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" stroke-width=".6" opacity=".6"/>
+        <path d="M20 9v22M13.5 16h13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div class="brand-text">
         <span class="eyebrow">Ministry Scheduler</span>
         <span id="church-name" class="church">Our Church</span>
       </div>
     </div>
     <nav class="tabs" aria-label="Sections">
-      <a href="#/schedule" data-tab="schedule">Schedule</a>
-      <a href="#/preaching" data-tab="preaching">Preaching</a>
-      <a href="#/ministers" data-tab="ministers">Ministers</a>
-      <a href="#/series" data-tab="series">Series</a>
-      <a href="#/settings" data-tab="settings">Settings</a>
+      <a href="#/schedule" data-tab="schedule">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4M9 14h2M13 14h2M9 17h2"/></svg>
+        <span>Schedule</span></a>
+      <a href="#/preaching" data-tab="preaching">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5zM12 6.5v13"/></svg>
+        <span>Preaching</span></a>
+      <a href="#/ministers" data-tab="ministers">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M15.5 14.2c2.4-.3 4.4 1.2 5 4"/></svg>
+        <span>Ministers</span></a>
+      <a href="#/series" data-tab="series">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 3.5 8 12 12.5 20.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5M3.5 16l8.5 4.5 8.5-4.5"/></svg>
+        <span>Series</span></a>
+      <a href="#/settings" data-tab="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+        <span>Settings</span></a>
     </nav>
-  </header>
+    <p class="rail-foot">Saved in this browser</p>
+  </aside>
 
-  <div id="month-nav" class="month-nav">
-    <button class="icon-btn" data-action="prev" aria-label="Previous month">&lsaquo;</button>
-    <h1 id="month-label" aria-live="polite">Month</h1>
-    <button class="icon-btn" data-action="next" aria-label="Next month">&rsaquo;</button>
-    <button class="btn small" data-action="today">This month</button>
+  <div class="main">
+    <header class="page-head">
+      <div class="title-block">
+        <span id="page-eyebrow" class="page-eyebrow">Schedule</span>
+        <h1 id="month-label" aria-live="polite">Month</h1>
+      </div>
+      <div id="month-nav" class="month-nav">
+        <button class="icon-btn" data-action="prev" aria-label="Previous month"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button>
+        <button class="btn small ghost" data-action="today">This month</button>
+        <button class="icon-btn" data-action="next" aria-label="Next month"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
+      </div>
+    </header>
+    <main id="view" class="view"></main>
   </div>
-
-  <main id="view" class="view"></main>
 
   <dialog id="modal" aria-label="Editor"></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -74,21 +74,45 @@ function writeHash() {
 
 // ---------- render ----------
 
+const TAB_TITLES = {
+  schedule: 'Schedule', preaching: 'Preaching', ministers: 'Ministers', series: 'Sermon series', settings: 'Settings',
+};
+
 function render() {
   writeHash();
   document.title = `${state.settings.churchName} · Ministry Scheduler`;
   $('#church-name').textContent = state.settings.churchName;
-  $('#month-label').textContent = `${M.MONTHS[view.m - 1]} ${view.y}`;
-  $('#month-nav').hidden = !MONTH_TABS.has(view.tab);
+  const monthTab = MONTH_TABS.has(view.tab);
+  $('#page-eyebrow').textContent = monthTab ? TAB_TITLES[view.tab] : state.settings.churchName;
+  $('#month-label').innerHTML = monthTab
+    ? `${esc(M.MONTHS[view.m - 1])} <span class="year">${view.y}</span>`
+    : esc(TAB_TITLES[view.tab]);
+  $('#month-nav').hidden = !monthTab;
   for (const a of $$('[data-tab]')) a.setAttribute('aria-current', a.dataset.tab === view.tab ? 'page' : 'false');
   const views = { schedule: renderSchedule, preaching: renderPreaching, ministers: renderMinisters, series: renderSeries, settings: renderSettings };
-  $('#view').innerHTML = views[view.tab]();
-  $('#view').dataset.view = view.tab;
+  const el = $('#view');
+  el.innerHTML = views[view.tab]();
+  if (el.dataset.view !== view.tab) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); }
+  el.dataset.view = view.tab;
 }
 
 function emptyState(title, body, action = '') {
-  return `<div class="empty"><h2>${esc(title)}</h2><p>${esc(body)}</p>${action}</div>`;
+  return `<div class="empty"><span class="ornament" aria-hidden="true"></span><h2>${esc(title)}</h2><p>${esc(body)}</p>${action}</div>`;
 }
+
+// Two-letter monogram: "Ana R." -> "AR", "Pastor Jon" -> "PJ".
+function initials(name) {
+  const parts = String(name).replace(/[^\p{L}\s]/gu, '').trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] || '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase() || '?';
+}
+
+const personTag = (name, cls = 'chip') => `<span class="${cls}"><span class="mono" aria-hidden="true">${esc(initials(name))}</span>${esc(name)}</span>`;
+
+const dayParts = iso => ({
+  num: M.parseISO(iso).d,
+  dow: M.formatDate(iso, { weekday: 'short' }),
+  mon: M.formatDate(iso, { month: 'short' }),
+});
 
 // Schedule: one row per service, one column per role.
 function renderSchedule() {
@@ -101,7 +125,7 @@ function renderSchedule() {
       <div class="toolbar-group">
         <button class="btn primary" data-action="fill-month">Add every ${esc(day)}</button>
         <button class="btn" data-action="new-service">Add a service</button>
-        ${list.length ? '<button class="btn" data-action="copy-roster">Copy roster</button>' : ''}
+        ${list.length ? '<button class="btn ghost" data-action="copy-roster">Copy roster</button>' : ''}
       </div>
       <label class="inline-field">Highlight
         <select data-action="focus" aria-label="Highlight a minister"><option value="">Nobody</option>${focusOptions}</select>
@@ -122,82 +146,93 @@ function renderSchedule() {
         const cls = ['chip'];
         if (id === view.focus) cls.push('focus');
         if (bad.has(`${role.id}:${id}`)) cls.push('conflict');
-        return `<span class="${cls.join(' ')}">${esc(personName(id))}</span>`;
+        return personTag(personName(id), cls.join(' '));
       }).join('');
-      const need = open ? `<span class="need">${ids.length ? `+${open} open` : 'Open'}</span>` : '';
-      return `<td data-label="${esc(role.name)}">${chips}${need}</td>`;
+      const need = open ? `<span class="need">${ids.length ? `${open} open` : 'Open'}</span>` : '';
+      return `<td data-label="${esc(role.name)}"><div class="cell">${chips}${need}</div></td>`;
     }).join('');
     const series = seriesById(svc.sermon?.seriesId);
+    const d = dayParts(svc.date);
     const flag = conflicts.length
-      ? `<span class="flag" title="${esc(conflicts.map(c => M.describeConflict(state, c)).join('\n'))}">${conflicts.length} issue${conflicts.length > 1 ? 's' : ''}</span>` : '';
+      ? `<span class="flag" title="${esc(conflicts.map(c => M.describeConflict(state, c)).join('\n'))}">${conflicts.length} to check</span>` : '';
     return `<tr data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0">
-      <th scope="row" class="when">
-        <span class="date">${esc(M.formatDate(svc.date))}</span>
-        <span class="meta">${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>
-        ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
-        ${flag}
-      </th>${cells}</tr>`;
+      <th scope="row" class="when"><div class="when-inner">
+        <span class="date-block"><span class="day-num">${d.num}</span><span class="day-dow">${esc(d.dow)}</span></span>
+        <span class="when-meta">
+          <span class="meta">${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>
+          ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
+          ${flag}
+        </span>
+      </div></th>${cells}</tr>`;
   }).join('');
   return toolbar + `<div class="table-wrap"><table class="matrix"><thead><tr><th scope="col">Service</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="hint">Click a service to assign people, add the sermon, or auto-fill open slots.</p>`;
+    <p class="hint">Select a service to assign people, write the sermon, or auto-fill open places.</p>`;
 }
 
-// Preaching: the month as a calendar, coloured by sermon series.
+// Preaching: the month as an arc of series. Each series is a ribbon spanning its Sundays;
+// each sermon is a folio beneath it. On phones the same DOM order reads top to bottom.
 function renderPreaching() {
   const list = M.servicesInMonth(state.services, view.y, view.m);
-  const bySeries = M.monthSeries(state, view.y, view.m);
-  const legend = bySeries.length ? bySeries.map(({ series, count, first, last }) => {
-    const firstPart = M.seriesPart(state.services, list.find(s => s.date === first && s.sermon.seriesId === series.id));
-    const lastSvc = list.filter(s => s.sermon.seriesId === series.id).pop();
-    const lastPart = M.seriesPart(state.services, lastSvc);
-    const parts = firstPart.n === lastPart.n ? `Part ${firstPart.n} of ${firstPart.of}` : `Parts ${firstPart.n}–${lastPart.n} of ${lastPart.of}`;
-    return `<button class="legend-item" style="--series:${esc(series.color)}" data-action="edit-series" data-id="${esc(series.id)}">
-      <span class="swatch"></span>
-      <span><strong>${esc(series.name)}</strong><small>${count} sermon${count > 1 ? 's' : ''} this month · ${esc(parts)}</small></span>
-    </button>`;
-  }).join('') : '<p class="muted">No series this month yet. Pick a series on a service, or create one under Series.</p>';
+  if (!list.length) return emptyState('No services this month', 'Add services on the Schedule tab, then plan the sermons here.');
+  const preacherOf = svc => M.assigned(svc, M.PREACHER_ROLE).filter(Boolean).map(personName);
 
-  const preacherOf = svc => M.assigned(svc, M.PREACHER_ROLE).filter(Boolean).map(personName).join(', ');
-  const card = svc => {
+  // consecutive runs of the same series
+  const runs = [];
+  list.forEach((svc, i) => {
+    const sid = svc.sermon?.seriesId || '';
+    const last = runs[runs.length - 1];
+    if (last && last.sid === sid) last.items.push({ svc, i });
+    else runs.push({ sid, items: [{ svc, i }] });
+  });
+
+  const folio = ({ svc, i }) => {
     const series = seriesById(svc.sermon?.seriesId);
     const part = M.seriesPart(state.services, svc);
-    return `<button class="sermon" data-action="edit-service" data-id="${esc(svc.id)}" style="--series:${esc(series?.color || 'var(--line-strong)')}">
-      <span class="sermon-series">${series ? esc(series.name) : 'No series'}${part ? ` · ${part.n}/${part.of}` : ''}</span>
-      <span class="sermon-title">${esc(svc.sermon?.title) || '<em>Title to come</em>'}</span>
-      ${svc.sermon?.scripture ? `<span class="sermon-scripture">${esc(svc.sermon.scripture)}</span>` : ''}
-      <span class="sermon-preacher">${esc(preacherOf(svc)) || '<em>Preacher open</em>'}</span>
+    const d = dayParts(svc.date);
+    const preachers = preacherOf(svc);
+    return `<button class="folio${svc.date === M.todayISO() ? ' today' : ''}" data-action="edit-service" data-id="${esc(svc.id)}"
+      style="grid-column:${i + 1};grid-row:2;--series:${esc(series?.color || 'var(--muted)')}">
+      <span class="folio-date"><span class="folio-num">${d.num}</span><span class="folio-dow">${esc(d.dow)} · ${esc(d.mon)}</span></span>
+      <span class="folio-part">${part ? `Part ${part.n} of ${part.of}` : 'Stand-alone'}</span>
+      <span class="folio-title">${esc(svc.sermon?.title) || '<em>Title to come</em>'}</span>
+      <span class="folio-scripture">${esc(svc.sermon?.scripture) || '<em>Scripture to come</em>'}</span>
+      <span class="folio-preacher">${preachers.length ? preachers.map(n => personTag(n, 'chip plain')).join('') : '<span class="need">Preacher open</span>'}</span>
     </button>`;
   };
 
-  const today = M.todayISO();
-  const weeks = M.monthGrid(view.y, view.m).map(week => week.map(iso => {
-    if (!iso) return '<div class="cal-cell out" aria-hidden="true"></div>';
-    const day = list.filter(s => s.date === iso);
-    return `<div class="cal-cell${day.length ? ' has' : ''}${iso === today ? ' today' : ''}">
-      <span class="cal-day">${M.parseISO(iso).d}</span>${day.map(card).join('')}</div>`;
-  }).join('')).join('');
-  const heads = M.WEEKDAYS.map(d => `<div class="cal-head">${d.slice(0, 3)}</div>`).join('');
-  // Days that hold services get wider columns, so a Sunday-only church isn't squeezed into 1/7.
-  const busy = new Set(list.map(s => M.weekday(s.date)));
-  const cols = M.WEEKDAYS.map((_, i) => (busy.has(i) ? 'minmax(0, 2.4fr)' : 'minmax(0, 1fr)')).join(' ');
+  const arc = runs.map(run => {
+    const series = seriesById(run.sid);
+    const first = run.items[0];
+    const lastItem = run.items[run.items.length - 1];
+    let label = '<span class="ribbon-name">No series</span>';
+    let meta = `${run.items.length} sermon${run.items.length > 1 ? 's' : ''}`;
+    if (series) {
+      const a = M.seriesPart(state.services, first.svc);
+      const b = M.seriesPart(state.services, lastItem.svc);
+      label = `<span class="ribbon-name">${esc(series.name)}</span>`;
+      meta = a.n === b.n ? `Part ${a.n} of ${a.of}` : `Parts ${a.n}–${b.n} of ${b.of}`;
+    }
+    const tag = series ? 'button' : 'div';
+    const attrs = series ? ` data-action="edit-series" data-id="${esc(series.id)}"` : '';
+    return `<${tag} class="ribbon${series ? '' : ' none'}"${attrs} style="grid-column:${first.i + 1} / span ${run.items.length};grid-row:1;--series:${esc(series?.color || 'var(--muted)')}">
+        ${label}<span class="ribbon-meta">${esc(meta)}</span></${tag}>${run.items.map(folio).join('')}`;
+  }).join('');
 
   const rows = list.map(svc => {
     const series = seriesById(svc.sermon?.seriesId);
     const part = M.seriesPart(state.services, svc);
-    return `<tr data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0" style="--series:${esc(series?.color || 'transparent')}">
-      <td class="band" data-label="Date">${esc(M.formatDate(svc.date))}</td>
-      <td data-label="Series">${series ? esc(series.name) : '<span class="muted">None</span>'}${part ? ` <span class="muted">${part.n}/${part.of}</span>` : ''}</td>
-      <td data-label="Title"><strong>${esc(svc.sermon?.title) || '<span class="muted">To come</span>'}</strong></td>
-      <td data-label="Scripture">${esc(svc.sermon?.scripture) || '<span class="muted">—</span>'}</td>
-      <td data-label="Preacher">${esc(preacherOf(svc)) || '<span class="need">Open</span>'}</td>
+    return `<tr data-action="edit-service" data-id="${esc(svc.id)}" tabindex="0" style="--series:${esc(series?.color || 'var(--line-strong)')}">
+      <td data-label="Date" class="nowrap">${esc(M.formatDate(svc.date))}</td>
+      <td data-label="Series"><span class="series-tag">${series ? esc(series.name) : 'None'}${part ? ` <span class="muted">${part.n}/${part.of}</span>` : ''}</span></td>
+      <td data-label="Title" class="plan-title">${esc(svc.sermon?.title) || '<span class="muted">To come</span>'}</td>
+      <td data-label="Scripture" class="plan-scripture">${esc(svc.sermon?.scripture) || '<span class="muted">—</span>'}</td>
+      <td data-label="Preacher">${esc(preacherOf(svc).join(', ')) || '<span class="need">Open</span>'}</td>
     </tr>`;
   }).join('');
 
-  return `<section class="legend" aria-label="Series this month">${legend}</section>
-    ${list.length ? '' : emptyState('No services this month', 'Add services on the Schedule tab, then plan the sermons here.')}
-    <div class="calendar" aria-label="Preaching calendar" style="grid-template-columns:${cols}">${heads}${weeks}</div>
-    ${list.length ? `<h2 class="section-title">Preaching plan</h2>
-    <div class="table-wrap"><table class="plan"><thead><tr><th>Date</th><th>Series</th><th>Title</th><th>Scripture</th><th>Preacher</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+  return `<div class="arc-wrap"><section class="arc" aria-label="Sermons this month by series" style="--n:${list.length}">${arc}</section></div>
+    <div class="section-head"><h2 class="section-title">Preaching plan</h2><span class="muted">${list.length} sermon${list.length > 1 ? 's' : ''} in ${esc(M.MONTHS[view.m - 1])}</span></div>
+    <div class="table-wrap"><table class="plan"><thead><tr><th>Date</th><th>Series</th><th>Title</th><th>Scripture</th><th>Preacher</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function renderMinisters() {
@@ -210,15 +245,17 @@ function renderMinisters() {
     const load = M.monthLoad(state.services, p.id, view.y, view.m);
     const next = M.personSchedule(state, p.id, today)[0];
     const away = (p.unavailable || []).filter(d => d >= today).length;
-    const roles = state.roles.filter(r => M.canServe(p, r.id)).map(r => `<span class="chip">${esc(r.name)}</span>`).join('')
-      || '<span class="muted">No roles yet</span>';
+    const roles = state.roles.filter(r => M.canServe(p, r.id)).map(r => esc(r.name)).join('<span class="dot" aria-hidden="true">·</span>')
+      || 'No roles yet';
     return `<button class="person" data-action="edit-person" data-id="${esc(p.id)}">
-      <span class="person-name">${esc(p.name)}</span>
-      <span class="chips">${roles}</span>
+      <span class="person-top">
+        <span class="mono large" aria-hidden="true">${esc(initials(p.name))}</span>
+        <span class="person-id"><span class="person-name">${esc(p.name)}</span><span class="person-roles">${roles}</span></span>
+        <span class="load" title="Services in ${esc(M.MONTHS[view.m - 1])}"><strong>${load}</strong><small>${esc(M.MONTHS[view.m - 1].slice(0, 3))}</small></span>
+      </span>
       <span class="person-meta">
-        <span><strong>${load}</strong> service${load === 1 ? '' : 's'} in ${esc(M.MONTHS[view.m - 1])}</span>
-        ${next ? `<span>Next: ${esc(M.formatDate(next.service.date))} · ${esc(next.roles.map(r => r.name).join(', '))}</span>` : ''}
-        ${away ? `<span>${away} date${away > 1 ? 's' : ''} away</span>` : ''}
+        <span>${next ? `Next · ${esc(M.formatDate(next.service.date))}, ${esc(next.roles.map(r => r.name).join(', '))}` : 'Nothing coming up'}</span>
+        ${away ? `<span class="away-note">${away} date${away > 1 ? 's' : ''} away</span>` : ''}
       </span>
     </button>`;
   }).join('');
@@ -228,17 +265,24 @@ function renderMinisters() {
 function renderSeries() {
   const list = state.series.slice().sort((a, b) => (b.start || '').localeCompare(a.start || ''));
   const toolbar = `<div class="toolbar"><button class="btn primary" data-action="new-series">New series</button></div>`;
-  if (!list.length) return toolbar + emptyState('No sermon series yet', 'Create a series, give it dates and a colour, and the preaching calendar will show it.');
+  if (!list.length) return toolbar + emptyState('No sermon series yet', 'Create a series, give it dates and a colour, and the Preaching tab will show it.');
   const cards = list.map(s => {
     const sermons = M.sortServices(state.services.filter(x => x.sermon?.seriesId === s.id));
     const range = s.start && s.end ? `${M.formatDate(s.start, { day: 'numeric', month: 'short', year: 'numeric' })} – ${M.formatDate(s.end, { day: 'numeric', month: 'short', year: 'numeric' })}` : 'No dates set';
-    const items = sermons.map((x, i) => `<li><span class="muted">${i + 1}.</span> <span>${esc(M.formatDate(x.date, { day: 'numeric', month: 'short' }))}</span>
-      <strong>${esc(x.sermon.title) || '<em class="muted">Title to come</em>'}</strong> <span class="muted">${esc(x.sermon.scripture)}</span></li>`).join('');
+    const items = sermons.map((x, i) => `<li><span class="li-num">${i + 1}</span>
+      <span class="li-body"><span class="li-title">${esc(x.sermon.title) || '<em>Title to come</em>'}</span>
+      <span class="li-meta">${esc(M.formatDate(x.date, { day: 'numeric', month: 'short' }))}${x.sermon.scripture ? ` · ${esc(x.sermon.scripture)}` : ''}</span></span></li>`).join('');
     return `<article class="series-card" style="--series:${esc(s.color)}">
-      <header><span class="swatch"></span><div><h2>${esc(s.name)}</h2><p class="muted">${esc(range)} · ${sermons.length} sermon${sermons.length === 1 ? '' : 's'}</p></div>
-      <button class="btn small" data-action="edit-series" data-id="${esc(s.id)}">Edit</button></header>
-      ${s.description ? `<p>${esc(s.description)}</p>` : ''}
-      ${items ? `<ol class="sermon-list">${items}</ol>` : '<p class="muted">No services tagged with this series yet.</p>'}
+      <header class="cover">
+        <span class="cover-eyebrow">${sermons.length} sermon${sermons.length === 1 ? '' : 's'}</span>
+        <h2>${esc(s.name)}</h2>
+        <span class="cover-range">${esc(range)}</span>
+        <button class="btn small on-cover" data-action="edit-series" data-id="${esc(s.id)}">Edit</button>
+      </header>
+      <div class="series-body">
+        ${s.description ? `<p class="series-desc">${esc(s.description)}</p>` : ''}
+        ${items ? `<ol class="sermon-list">${items}</ol>` : '<p class="muted">No services tagged with this series yet.</p>'}
+      </div>
     </article>`;
   }).join('');
   return toolbar + `<div class="series-grid">${cards}</div>`;

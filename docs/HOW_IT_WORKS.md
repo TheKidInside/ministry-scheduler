@@ -150,7 +150,7 @@ three months) so the screens explain themselves. It sets `settings.seeded`, so
 | Tab | Function | What it shows |
 |---|---|---|
 | Schedule | `renderSchedule` | services × roles table, open slots, conflict flags, "Highlight" one minister |
-| Preaching | `renderPreaching` | series legend, month calendar with series-coloured sermon cards, preaching plan table |
+| Preaching | `renderPreaching` | the series arc (a coloured ribbon spans each series' Sundays, with a sermon folio under each) and the preaching plan table |
 | Ministers | `renderMinisters` | each person, their roles, services this month, next assignment, away dates |
 | Series | `renderSeries` | each series with dates, colour and its numbered sermon list |
 | Settings | `renderSettings` | church name, usual day/time, roles, theme, backup/import |
@@ -165,11 +165,16 @@ bookmark opens the same view.
 
 ### 3.5 [css/styles.css](../css/styles.css)
 
-Colour tokens on `:root`, a dark set under `prefers-color-scheme`, and a
-`[data-theme]` override for the System/Light/Dark switch. Each series colour is
-passed as a CSS variable (`style="--series:#8a3b32"`), so one rule colours bands,
-tints and legend bars. Under 760px the tables become stacked cards and the
-calendar hides (the plan list carries the month).
+The look is called "Vestry": a deep ink rail with gold hairlines, cool porcelain pages,
+Cormorant Garamond for headings and dates, Hanken Grotesk for working text. Series
+colours are jewel tones (`SERIES_COLORS` in model.js), the only saturated colour on the page.
+Colour tokens live on `:root`, with a dark set under `prefers-color-scheme` and a
+`[data-theme]` override for the System/Light/Dark switch. Each series colour is passed
+as a CSS variable (`style="--series:#6b4c9a"`), so one rule colours ribbons, covers,
+numerals and diamonds. The arc is a CSS grid with explicit `grid-column` placement;
+under 760px it switches to `display:block`, so the same DOM order (ribbon, its sermons,
+next ribbon...) reads top to bottom. On phones the rail becomes a bottom tab bar and
+editors open as bottom sheets; on desktop they slide in from the right.
 
 ---
 
@@ -179,7 +184,7 @@ calendar hides (the plan list carries the month).
 2. The editor clones the service (`structuredClone`), so typing doesn't change the real data until you save.
 3. You type a title and press **Save** → `openDialog`'s submit handler validates → `onSubmit` → `readServiceForm` builds the new service object from the inputs.
 4. `putDoc('services', next)` replaces it in `state` **and** calls `store.putDoc`, which writes localStorage.
-5. The dialog closes, `render()` redraws, and the Preaching calendar shows the new title in the series colour.
+5. The dialog closes, `render()` redraws, and the Preaching arc shows the new title under its series ribbon.
 
 ---
 

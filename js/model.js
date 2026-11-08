@@ -11,7 +11,8 @@ export const DEFAULT_ROLES = [
 
 export const PREACHER_ROLE = 'preacher';
 
-export const SERIES_COLORS = ['#8a3b32', '#2f6a57', '#3d5688', '#b07d22', '#6d4f86', '#a4532f', '#4d7a8c'];
+// Jewel tones, like stained glass: amethyst, emerald, sapphire, garnet, ochre gold, teal, plum.
+export const SERIES_COLORS = ['#6b4c9a', '#2e6f5e', '#2f5597', '#8e2f3c', '#a07a1f', '#2a6f7d', '#7a3b69'];
 
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 export const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
