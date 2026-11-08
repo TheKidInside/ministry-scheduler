@@ -14,6 +14,10 @@ export const PREACHER_ROLE = 'preacher';
 // Jewel tones, like stained glass: amethyst, emerald, sapphire, garnet, ochre gold, teal, plum.
 export const SERIES_COLORS = ['#6b4c9a', '#2e6f5e', '#2f5597', '#8e2f3c', '#a07a1f', '#2a6f7d', '#7a3b69'];
 
+// Song keys for the setlist: majors, then minors, in the spellings worship charts use.
+export const SONG_KEYS = ['C', 'C#', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B',
+  'Cm', 'C#m', 'Dm', 'D#m', 'Ebm', 'Em', 'Fm', 'F#m', 'Gm', 'G#m', 'Am', 'Bbm', 'Bm'];
+
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 export const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -99,6 +103,7 @@ export function newService({ date, time = '', name = 'Sunday Service', seriesId 
     name,
     assignments: {},
     sermon: { title: '', scripture: '', seriesId },
+    setlist: [],
     notes: '',
   };
 }
@@ -127,6 +132,25 @@ export function peopleOnService(service) {
   const ids = new Set();
   for (const list of Object.values(service.assignments || {})) for (const id of list) if (id) ids.add(id);
   return ids;
+}
+
+// ---------- setlist ----------
+
+// "Amazing Grace (G)", or just the title when no key is set.
+export const songLabel = song => (song.key ? `${song.title} (${song.key})` : song.title);
+
+// Every song sung so far, once each, with the key it was last sung in: the setlist's suggestions.
+export function songLibrary(services) {
+  const out = new Map();
+  for (const svc of sortServices(services)) {
+    for (const song of svc.setlist || []) {
+      const id = song.title.trim().toLowerCase();
+      if (!id) continue;
+      const prev = out.get(id);
+      out.set(id, { title: song.title, key: song.key || prev?.key || '', times: (prev?.times || 0) + 1, last: svc.date });
+    }
+  }
+  return [...out.values()].sort((a, b) => a.title.localeCompare(b.title));
 }
 
 // ---------- series ----------
@@ -249,6 +273,69 @@ export function personSchedule(state, personId, fromISO = '') {
   return out;
 }
 
+// ---------- your assignments / letting people know ----------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const normEmail = v => String(v ?? '').trim().toLowerCase();
+export const isEmail = v => EMAIL_RE.test(normEmail(v));
+
+// The email that links a minister to a sign-in. Older profiles kept it in "contact".
+export function personEmail(person) {
+  const e = normEmail(person.email);
+  if (e) return e;
+  const c = normEmail(person.contact);
+  return EMAIL_RE.test(c) ? c : '';
+}
+
+export function personPhone(person) {
+  const c = String(person.contact ?? '').trim();
+  return /^\+?[\d\s().-]{7,}$/.test(c) ? c.replace(/[^\d+]/g, '') : '';
+}
+
+export function findPersonByEmail(people, email) {
+  const e = normEmail(email);
+  return e ? people.find(p => personEmail(p) === e) || null : null;
+}
+
+// One key per service, role and date, so moving a service to another day counts as new.
+export const assignmentKey = (service, roleId) => `${service.id}:${roleId}:${service.date}`;
+
+// Upcoming assignments for one person, each with the keys used to remember what they've seen.
+export function upcomingFor(state, personId, fromISO) {
+  return personSchedule(state, personId, fromISO).map(x => ({ ...x, keys: x.roles.map(r => assignmentKey(x.service, r.id)) }));
+}
+
+// Who an edit put on a service: personId -> the role ids they were not on before.
+// `before` is null for a new service. Moving the date makes everyone on it new.
+export function addedAssignments(before, after) {
+  const out = new Map();
+  const sameDay = before && before.date === after.date;
+  for (const [roleId, list] of Object.entries(after.assignments || {})) {
+    const had = new Set(sameDay ? assigned(before, roleId) : []);
+    for (const pid of list) {
+      if (!pid || had.has(pid)) continue;
+      if (!out.has(pid)) out.set(pid, []);
+      if (!out.get(pid).includes(roleId)) out.get(pid).push(roleId);
+    }
+  }
+  return out;
+}
+
+// The text sent to someone you've just put on the roster.
+export function assignmentMessage(state, person, service, roleIds, link = '') {
+  const roles = roleIds.map(id => state.roles.find(r => r.id === id)?.name || id);
+  const roleText = roles.length > 1 ? `${roles.slice(0, -1).join(', ')} and ${roles[roles.length - 1]}` : roles[0] || 'serving';
+  const first = String(person.name).trim().split(/\s+/)[0] || person.name;
+  const when = formatDate(service.date, { weekday: 'long', day: 'numeric', month: 'long' }) + (service.time ? `, ${service.time}` : '');
+  const lines = [`Hi ${first}, you're on ${roleText} for ${service.name} on ${when}.`];
+  const sermon = service.sermon || {};
+  if (sermon.title || sermon.scripture) lines.push(`Sermon: ${[sermon.title, sermon.scripture].filter(Boolean).join(' · ')}`);
+  if (service.setlist?.length) lines.push(`Setlist: ${service.setlist.map(songLabel).join(', ')}`);
+  lines.push(`${state.settings.churchName}`);
+  if (link) lines.push(`Your schedule: ${link}`);
+  return lines.join('\n');
+}
+
 // Removing a role or person must not leave dangling ids behind on services.
 export function removePersonEverywhere(services, personId) {
   return services.map(s => {
@@ -325,6 +412,9 @@ export function normalizeState(raw) {
       name: str(s.name) || 'Service',
       assignments,
       sermon: { title: str(sermon.title), scripture: str(sermon.scripture), seriesId: str(sermon.seriesId) },
+      setlist: (Array.isArray(s.setlist) ? s.setlist : [])
+        .filter(x => x && str(x.title).trim()).slice(0, 30)
+        .map(x => ({ title: str(x.title).trim().slice(0, 120), key: str(x.key).trim().slice(0, 8) })),
       notes: str(s.notes),
     };
   });
@@ -342,7 +432,7 @@ export function normalizeState(raw) {
     },
     roles,
     people: arr(raw.people, 'people').filter(p => p && str(p.id) && str(p.name)).map(p => ({
-      id: str(p.id), name: str(p.name), contact: str(p.contact),
+      id: str(p.id), name: str(p.name), contact: str(p.contact), email: normEmail(p.email),
       roleIds: ids(p.roleIds), unavailable: ids(p.unavailable).filter(isValidISO),
     })),
     series: arr(raw.series, 'series').filter(x => x && str(x.id) && str(x.name)).map(x => ({
@@ -363,6 +453,7 @@ export function rosterText(state, y, m) {
     const series = state.series.find(s => s.id === svc.sermon?.seriesId);
     const sermon = [svc.sermon?.title, svc.sermon?.scripture].filter(Boolean).join(' (') + (svc.sermon?.title && svc.sermon?.scripture ? ')' : '');
     if (sermon || series) lines.push(`Sermon: ${sermon || 'TBA'}${series ? ` [${series.name}]` : ''}`);
+    if (svc.setlist?.length) lines.push(`Setlist: ${svc.setlist.map(songLabel).join(', ')}`);
     for (const role of state.roles) {
       const ids = assigned(svc, role.id).filter(Boolean);
       lines.push(`${role.name}: ${ids.length ? ids.map(name).join(', ') : 'OPEN'}`);

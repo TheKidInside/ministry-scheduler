@@ -98,6 +98,7 @@ function render() {
   if (el.dataset.view !== view.tab) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); }
   el.dataset.view = view.tab;
   renderAccountButton();
+  renderMineButton();
 }
 
 function emptyState(title, body, action = '') {
@@ -165,6 +166,7 @@ function renderSchedule() {
         <span class="when-meta">
           <span class="meta">${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>
           ${series ? `<span class="series-tag" style="--series:${esc(series.color)}">${esc(series.name)}</span>` : ''}
+          ${svc.setlist?.length ? `<span class="songs-tag" title="${esc(svc.setlist.map(M.songLabel).join('\n'))}">${svc.setlist.length} song${svc.setlist.length > 1 ? 's' : ''}</span>` : ''}
           ${flag}
         </span>
       </div></th>${cells}</tr>`;
@@ -388,6 +390,25 @@ function roleSelect(role, svc, slotIndex, personId) {
   </select>`;
 }
 
+function keySelect(value) {
+  const keys = !value || M.SONG_KEYS.includes(value) ? M.SONG_KEYS : [value, ...M.SONG_KEYS];
+  return `<select name="song-key" aria-label="Key"><option value="">Key</option>${keys.map(k => `<option ${k === value ? 'selected' : ''}>${esc(k)}</option>`).join('')}</select>`;
+}
+
+const songRow = (song = { title: '', key: '' }) => `<li class="song-row">
+  <input name="song-title" value="${esc(song.title)}" list="song-library" maxlength="120" placeholder="Song title" aria-label="Song title" autocomplete="off">
+  ${keySelect(song.key)}
+  <button type="button" class="icon-btn small" data-song="up" aria-label="Move up"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
+  <button type="button" class="icon-btn small" data-song="remove" aria-label="Remove song">&times;</button></li>`;
+
+const MAX_SONGS = 30; // normalizeState keeps this many
+
+function addSong(list) {
+  if ($$('.song-row', list).length >= MAX_SONGS) { toast(`A setlist holds up to ${MAX_SONGS} songs.`, 'warn'); return; }
+  list.insertAdjacentHTML('beforeend', songRow());
+  $('.song-row:last-child [name="song-title"]', list).focus();
+}
+
 function serviceFormBody(svc) {
   const roles = state.roles.map(role => {
     const ids = M.assigned(svc, role.id);
@@ -415,6 +436,12 @@ function serviceFormBody(svc) {
       <legend>Who is serving</legend>
       <div class="roles">${roles}</div>
     </fieldset>
+    <fieldset class="setlist-fields">
+      <legend>Setlist</legend>
+      <ol class="setlist">${(svc.setlist || []).map(songRow).join('')}</ol>
+      <div><button type="button" class="btn small" data-song="add">Add a song</button></div>
+      <datalist id="song-library">${M.songLibrary(state.services).map(s => `<option value="${esc(s.title)}">${s.key ? `Key of ${esc(s.key)}` : ''}</option>`).join('')}</datalist>
+    </fieldset>
     <label>Notes <textarea name="notes" rows="2" maxlength="500">${esc(svc.notes)}</textarea></label>
     <div class="conflicts" aria-live="polite"></div>`;
 }
@@ -436,6 +463,9 @@ function readServiceForm(form, base) {
       scripture: form.elements['sermon-scripture'].value.trim(),
       seriesId: form.elements['sermon-series'].value,
     },
+    setlist: $$('.song-row', form)
+      .map(row => ({ title: $('[name="song-title"]', row).value.trim(), key: $('[name="song-key"]', row).value }))
+      .filter(song => song.title),
     notes: form.elements.notes.value.trim(),
   };
 }
@@ -468,11 +498,41 @@ function openServiceEditor(existing, date) {
       const refresh = () => showConflicts(form, readServiceForm(form, svc));
       refresh();
       form.addEventListener('change', e => {
+        // A song sung before brings back the key it was last sung in.
+        if (e.target.name === 'song-title') {
+          const key = $('[name="song-key"]', e.target.closest('.song-row'));
+          const known = M.songLibrary(state.services).find(s => s.title.toLowerCase() === e.target.value.trim().toLowerCase());
+          if (known?.key && !key.value) key.value = known.key;
+          return;
+        }
         if (e.target.name === 'date' && e.target.value && !form.elements['sermon-series'].value) {
           const cover = M.seriesCoveringDate(state.series, e.target.value);
           if (cover) form.elements['sermon-series'].value = cover.id;
         }
         refresh();
+      });
+      // Enter in a song title moves to the next song (adding one at the end) instead of saving.
+      form.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' || e.target.name !== 'song-title' || e.isComposing) return;
+        e.preventDefault();
+        const next = e.target.closest('.song-row').nextElementSibling;
+        if (next) $('[name="song-title"]', next).focus();
+        else if (e.target.value.trim()) addSong($('.setlist', form));
+      });
+      form.addEventListener('click', e => {
+        const btn = e.target.closest('[data-song]');
+        if (!btn) return;
+        const list = $('.setlist', form);
+        const row = btn.closest('.song-row');
+        if (btn.dataset.song === 'add') {
+          addSong(list);
+        } else if (btn.dataset.song === 'up' && row.previousElementSibling) {
+          row.previousElementSibling.before(row);
+          // At the top the up button hides, so keep focus on the row's title instead.
+          $(row.previousElementSibling ? '[data-song="up"]' : '[name="song-title"]', row).focus();
+        } else if (btn.dataset.song === 'remove') {
+          row.remove();
+        }
       });
       $('[data-local="autofill"]', form).addEventListener('click', () => {
         const current = readServiceForm(form, svc);
@@ -491,10 +551,20 @@ function openServiceEditor(existing, date) {
         return false;
       }
       const next = readServiceForm(form, svc);
+      const added = M.addedAssignments(isNew ? null : existing, next);
       await putDoc('services', next);
       const { y, m } = M.parseISO(next.date);
       if (y !== view.y || m !== view.m) { view.y = y; view.m = m; }
       toast('Service saved.');
+      // Putting yourself on a service shouldn't also pop up "You're on…" over "Service saved."
+      const self = me();
+      if (self && added.has(self.id)) added.get(self.id).forEach(r => mine.announced.add(M.assignmentKey(next, r)));
+      // Offer to message whoever was just put on it, once this dialog has closed. If it was
+      // already closed (Esc during a slow save), wait a tick so the form's own close() runs first.
+      if (added.size) {
+        if (dialog().open) dialog().addEventListener('close', () => openNotify(next, added), { once: true });
+        else setTimeout(() => openNotify(next, added), 0);
+      }
       return false;
     },
   });
@@ -504,7 +574,9 @@ function openServiceEditor(existing, date) {
 
 function openPersonEditor(existing) {
   const isNew = !existing;
-  const person = existing ? structuredClone(existing) : { id: M.uid('p_'), name: '', contact: '', roleIds: [], unavailable: [] };
+  const person = existing ? structuredClone(existing) : { id: M.uid('p_'), name: '', contact: '', email: '', roleIds: [], unavailable: [] };
+  // Older profiles kept an email in "Phone or email": show it in the Email box instead.
+  if (!person.email && M.isEmail(person.contact)) { person.email = M.normEmail(person.contact); person.contact = ''; }
   const roles = state.roles.map(r => `<label class="check"><input type="checkbox" name="roles" value="${esc(r.id)}" ${M.canServe(person, r.id) ? 'checked' : ''}> ${esc(r.name)}</label>`).join('');
   const upcoming = isNew ? [] : M.personSchedule(state, person.id, M.todayISO()).slice(0, 8);
   const schedule = upcoming.length
@@ -515,8 +587,11 @@ function openPersonEditor(existing) {
   openDialog(dialogHead(isNew ? 'New minister' : person.name) + `<div class="dialog-body">
       <div class="row2">
         <label>Name <input name="name" value="${esc(person.name)}" required maxlength="60" autocomplete="off"></label>
-        <label>Phone or email <input name="contact" value="${esc(person.contact)}" maxlength="80" autocomplete="off"></label>
+        <label>Phone <input name="contact" type="tel" value="${esc(person.contact)}" maxlength="40" autocomplete="off" inputmode="tel"></label>
       </div>
+      <label>Email <input name="email" type="email" value="${esc(person.email)}" maxlength="120" autocomplete="off" inputmode="email"
+        placeholder="The one they sign in with"></label>
+      <p class="hint">When they sign in with this email, the app shows them every service they're put on.</p>
       <fieldset><legend>Can serve as</legend><div class="checks">${roles}</div></fieldset>
       <fieldset><legend>Away dates</legend>
         <div class="add-date"><input type="date" name="away" aria-label="Date away"><button type="button" class="btn" data-local="add-date">Add date</button></div>
@@ -532,6 +607,7 @@ function openPersonEditor(existing) {
     </footer>`, {
     onMount(form) {
       const redraw = () => { $('.away', form).innerHTML = awayList(); };
+      form.elements.email.addEventListener('input', () => form.elements.email.setCustomValidity(''));
       $('[data-local="add-date"]', form).addEventListener('click', () => {
         const v = form.elements.away.value;
         if (!M.isValidISO(v)) { form.elements.away.focus(); return; }
@@ -558,6 +634,13 @@ function openPersonEditor(existing) {
         toast('Minister deleted.');
         return false;
       }
+      const email = M.normEmail(form.elements.email.value);
+      const twin = email && state.people.find(p => p.id !== person.id && M.personEmail(p) === email);
+      if (twin) {
+        form.elements.email.setCustomValidity(`${twin.name} already uses this email.`);
+        form.elements.email.reportValidity();
+        return true;
+      }
       // a date typed but not "added" still counts
       const pending = form.elements.away.value;
       if (M.isValidISO(pending) && !person.unavailable.includes(pending)) person.unavailable.push(pending);
@@ -565,6 +648,7 @@ function openPersonEditor(existing) {
         ...person,
         name: form.elements.name.value.trim(),
         contact: form.elements.contact.value.trim(),
+        email,
         roleIds: $$('input[name="roles"]:checked', form).map(i => i.value),
         unavailable: person.unavailable.slice().sort(),
       });
@@ -736,17 +820,20 @@ async function useStore(next) {
 async function useLocal() {
   cloudState.churchId = '';
   cloudState.info = null;
+  resetMine();
   await useStore(localStore);
 }
 
 async function useChurch(churchId) {
   if (!churchId || churchId === cloudState.churchId || churchId === opening) return;
   opening = churchId;
+  resetMine(); // the last church's "seen" list must not count against this one
   const C = await import('./cloud.js');
   try {
     if (await useStore(new C.FirebaseStore(churchId, { onError: cloudError }))) {
       cloudState.churchId = churchId;
       removedNotice = false;
+      await loadSeen();
       cloudState.info = await C.churchInfo(churchId).catch(() => null);
     }
   } catch (err) {
@@ -1022,6 +1109,145 @@ function openAccount() {
   });
 }
 
+// ---------- your schedule (in-app notifications) ----------
+
+// Signed in to a church, the minister whose email matches your sign-in is "you". The bell
+// counts your upcoming assignments you haven't opened yet; `seen` lives on users/{uid}.
+const mine = { loaded: false, seen: new Set(), announced: new Set() };
+
+function me() {
+  if (!isCloud() || !cloudState.user?.email) return null;
+  return M.findPersonByEmail(state.people, cloudState.user.email);
+}
+
+function myUpcoming() {
+  const person = me();
+  return person ? M.upcomingFor(state, person.id, M.todayISO()) : [];
+}
+
+const isUnseen = item => item.keys.some(k => !mine.seen.has(k));
+
+async function loadSeen() {
+  mine.loaded = false;
+  mine.seen = new Set();
+  mine.announced = new Set();
+  if (!cloudState.user) return;
+  const C = await import('./cloud.js');
+  try {
+    mine.seen = new Set(await C.seenAssignments(cloudState.user.uid));
+    mine.loaded = true;
+  } catch { /* offline: the bell waits until the next time the church opens */ }
+}
+
+function resetMine() {
+  mine.loaded = false;
+  mine.seen = new Set();
+  mine.announced = new Set();
+}
+
+function renderMineButton() {
+  const btn = $('#mine-btn');
+  if (!btn) return;
+  btn.hidden = !isCloud();
+  if (!isCloud()) return;
+  const fresh = mine.loaded ? myUpcoming().filter(isUnseen) : [];
+  const count = $('.bell-count', btn);
+  count.hidden = !fresh.length;
+  count.textContent = fresh.length > 9 ? '9+' : String(fresh.length);
+  const label = fresh.length ? `Your schedule: ${fresh.length} new` : 'Your schedule';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+  // Tell you once about each assignment that arrives, whether on opening the app or live.
+  const unannounced = fresh.filter(x => x.keys.some(k => !mine.announced.has(k)));
+  if (!unannounced.length) return;
+  unannounced.forEach(x => x.keys.forEach(k => mine.announced.add(k)));
+  if (unannounced.length === 1) {
+    const x = unannounced[0];
+    toast(`You're on ${x.roles.map(r => r.name).join(' and ')}, ${M.formatDate(x.service.date)}. Tap the bell to see it.`);
+  } else {
+    toast(`You have ${unannounced.length} new assignments. Tap the bell to see them.`);
+  }
+}
+
+async function openMine() {
+  // The seen list didn't load (offline at startup): try again now, so this list is right.
+  if (!mine.loaded && isCloud()) await loadSeen();
+  const person = me();
+  const email = cloudState.user?.email || '';
+  let body;
+  if (!person) {
+    body = `<p class="lead">Your sign-in isn't linked to a minister yet.</p>
+      <p class="muted">Ask whoever runs the roster to open your profile on the Ministers tab and set its email to <strong>${esc(email)}</strong>. Then this bell tells you whenever you're put on a service.</p>`;
+  } else {
+    const list = myUpcoming();
+    body = list.length
+      ? `<ul class="mine-list">${list.map(x => {
+        const d = dayParts(x.service.date);
+        const sermon = x.service.sermon || {};
+        return `<li class="${isUnseen(x) ? 'is-new' : ''}">
+          <span class="date-block"><span class="day-num">${d.num}</span><span class="day-dow">${esc(d.dow)} ${esc(d.mon)}</span></span>
+          <span class="mine-body"><span class="mine-roles">${esc(x.roles.map(r => r.name).join(', '))}</span>
+            <span class="muted">${esc([x.service.time, x.service.name].filter(Boolean).join(' · '))}${sermon.title ? ` · ${esc(sermon.title)}` : ''}</span>
+            ${x.service.setlist?.length ? `<span class="mine-songs">${esc(x.service.setlist.map(M.songLabel).join(' · '))}</span>` : ''}</span>
+          ${isUnseen(x) ? '<span class="new-tag">New</span>' : ''}</li>`;
+      }).join('')}</ul>`
+      : '<p class="muted">You are not on any upcoming service.</p>';
+    // Opening the list counts as seeing it. Only upcoming keys are kept, so the doc stays small.
+    const keys = list.flatMap(x => x.keys);
+    if (mine.loaded && keys.some(k => !mine.seen.has(k))) {
+      mine.seen = new Set(keys);
+      renderMineButton();
+      import('./cloud.js').then(C => C.markAssignmentsSeen(cloudState.user.uid, keys)).catch(() => {});
+    }
+  }
+  openDialog(dialogHead('Your schedule', person ? person.name : email) + `<div class="dialog-body">${body}</div>
+    <footer class="dialog-actions"><span class="spacer"></span><button class="btn" value="cancel" formnovalidate>Close</button></footer>`);
+}
+
+// After a save puts people on a service: one tap each to message them.
+function openNotify(service, added) {
+  // Signed out, the app only holds this browser's copy, so a link would show them nothing.
+  const link = isCloud() ? `${location.origin}${location.pathname}` : '';
+  const rows = [...added].map(([pid, roleIds]) => ({ person: state.people.find(p => p.id === pid), roleIds }))
+    .filter(r => r.person);
+  if (!rows.length) return;
+  const items = rows.map((r, i) => {
+    const text = M.assignmentMessage(state, r.person, service, r.roleIds, link);
+    const phone = M.personPhone(r.person);
+    const email = M.personEmail(r.person);
+    const subject = `Serving ${M.formatDate(service.date)}: ${r.roleIds.map(id => state.roles.find(x => x.id === id)?.name || id).join(', ')}`;
+    return `<li>
+      <span class="mono" aria-hidden="true">${esc(initials(r.person.name))}</span>
+      <span class="notify-who"><span class="member-name">${esc(r.person.name)}</span>
+        <span class="muted small">${esc(r.roleIds.map(id => state.roles.find(x => x.id === id)?.name || id).join(', '))}</span></span>
+      <span class="notify-actions">
+        <button type="button" class="btn small" data-notify="${i}">${navigator.share ? 'Send' : 'Copy'}</button>
+        ${phone ? `<a class="btn small ghost" href="sms:${esc(phone)}?&body=${esc(encodeURIComponent(text))}">Text</a>` : ''}
+        ${email ? `<a class="btn small ghost" href="mailto:${esc(email)}?subject=${esc(encodeURIComponent(subject))}&body=${esc(encodeURIComponent(text))}">Email</a>` : ''}
+      </span></li>`;
+  }).join('');
+  const texts = rows.map(r => M.assignmentMessage(state, r.person, service, r.roleIds, link));
+  openDialog(dialogHead('Let them know', `${rows.length} newly on ${M.formatDate(service.date, { weekday: 'long', day: 'numeric', month: 'long' })}`) + `<div class="dialog-body">
+      <ul class="members notify-list">${items}</ul>
+      <p class="muted small">${navigator.share
+        ? 'Send opens Messenger, Viber or any app on your phone with the message written for you.'
+        : 'Copy puts the message on your clipboard, ready to paste into a chat.'} ${isCloud() ? 'Ministers with an email on their profile also see a new assignment in the app when they sign in.' : 'Sign in to sync, and ministers with an email on their profile also see it in the app.'}</p>
+    </div>
+    <footer class="dialog-actions"><span class="spacer"></span><button class="btn primary" value="cancel" formnovalidate>Done</button></footer>`, {
+    onMount(form) {
+      form.addEventListener('click', async e => {
+        const i = e.target.closest('[data-notify]')?.dataset.notify;
+        if (i === undefined) return;
+        const text = texts[Number(i)];
+        if (navigator.share) {
+          try { await navigator.share({ text }); return; } catch (err) { if (err.name === 'AbortError') return; }
+        }
+        try { await navigator.clipboard.writeText(text); toast('Message copied. Paste it into a chat.'); } catch { toast(text); }
+      });
+    },
+  });
+}
+
 // ---------- theme ----------
 
 function currentTheme() {
@@ -1086,6 +1312,7 @@ async function handleAction(el) {
       return undefined;
     }
     case 'account': return openAccount();
+    case 'mine': return openMine();
     case 'load-sample':
       if (!confirm(`Replace everything${isCloud() ? ' for everyone in this church' : ''} with the sample church? Export a backup first if you want to keep your data.`)) return;
       await replaceAll(sampleState());
@@ -1136,6 +1363,10 @@ function wire() {
       await saveRoles(e.target);
       render();
     }
+  });
+  // Back online after the seen list failed to load: load it so the bell starts counting.
+  window.addEventListener('online', async () => {
+    if (isCloud() && !mine.loaded) { await loadSeen(); if (!dialog().open) render(); }
   });
   window.addEventListener('hashchange', async () => { if (await onInviteHash()) return; readHash(); render(); });
   // Every way a dialog closes (Save, Cancel, the X, Esc) redraws once, picking up any change.

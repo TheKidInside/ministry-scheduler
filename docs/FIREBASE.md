@@ -23,12 +23,12 @@ Anyone holding the invite link can join, so it should only go to the ministry te
 ## Firestore layout
 
 ```
-users/{uid}                              { churchId }                       your church (one per account)
+users/{uid}                              { churchId, seen[] }               your church (one per account); the assignments you've opened
 churches/{churchId}                      { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name} }
 churches/{churchId}/roles/{roleId}       { name, slots, order }
-churches/{churchId}/people/{personId}    { name, contact, roleIds[], unavailable[] }
+churches/{churchId}/people/{personId}    { name, contact, email, roleIds[], unavailable[] }
 churches/{churchId}/series/{seriesId}    { name, color, start, end, description }
-churches/{churchId}/services/{serviceId} { date, time, name, assignments{}, sermon{}, notes }
+churches/{churchId}/services/{serviceId} { date, time, name, assignments{}, sermon{}, setlist[], notes }
 ```
 
 ## Store methods → Firestore
@@ -77,6 +77,6 @@ sign out, and an outsider being refused.
 
 ## Later
 
-- Cloud Function reminders (email, or Messenger/Viber via a bot) a few days before someone serves.
+- Cloud Function reminders (push, email, or Messenger/Viber via a bot) a few days before someone serves. Needs the Blaze plan. Today, the bell in the app and the "Let them know" share buttons cover notifications with no server.
 - Accept/decline per assignment: `assignments` values become `{ personId, status }`.
 - Ministers submitting their own away dates.

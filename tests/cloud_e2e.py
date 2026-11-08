@@ -62,10 +62,14 @@ with sync_playwright() as p:
     a = browser_page(browser)
     a.goto(BASE)
     a.wait_for_selector(".matrix tbody tr")
-    check("Sign in" in a.inner_text("#account-btn"), "signed out, the app says it is saved in this browser")
+    a.wait_for_function("document.querySelector('#account-btn').textContent.includes('Sign in')", timeout=15000)  # cloud loads lazily
+    check(True, "signed out, the app says it is saved in this browser")
     sign_up(a, "pastor@example.com")
-    a.click("#account-btn")
-    a.wait_for_selector('dialog[open] button[value="upload"]')
+    try:  # the app reopens the account dialog by itself after signing in; open it only if it didn't
+        a.wait_for_selector('dialog[open] button[value="upload"]', timeout=4000)
+    except Exception:
+        a.click("#account-btn")
+        a.wait_for_selector('dialog[open] button[value="upload"]')
     a.click('dialog button[value="upload"]')
     a.wait_for_selector("dialog[open] #invite-link", timeout=20000)
     invite = a.input_value("#invite-link")
@@ -99,10 +103,38 @@ with sync_playwright() as p:
     a.click('[data-tab="ministers"]')
     a.click('[data-action="new-person"]')
     a.fill('dialog input[name="name"]', "Synced Person")
+    a.fill('dialog input[name="email"]', "Leader@Example.com")
     a.click('dialog .dialog-actions button[value="save"]')
     b.click('[data-tab="ministers"]')
     b.wait_for_selector(".person:has-text('Synced Person')", timeout=15000)
     check(True, "a new minister reaches the other device")
+
+    # 4b. The pastor puts that minister (linked to the leader by email) on a service:
+    #     the pastor is offered a message to send, and the leader's bell lights up live
+    check(b.is_visible("#mine-btn") and not b.is_visible("#mine-btn .bell-count"), "signed in to a church, the bell shows with nothing new")
+    a.click('[data-tab="schedule"]')
+    a.click('[data-action="next"]')  # next month, so the service is still upcoming
+    a.locator(".matrix tbody tr").first.click()
+    a.wait_for_selector("dialog[open]")
+    a.locator('dialog select[name="role:tech"]').first.select_option(label="Synced Person")
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .notify-list", timeout=5000)
+    check("Synced Person" in a.inner_text("dialog .notify-list"), "saving offers to message the newly assigned minister")
+    a.click('dialog .dialog-actions button[value="cancel"]')
+    b.wait_for_selector("#mine-btn .bell-count:not([hidden])", timeout=15000)
+    check(b.inner_text("#mine-btn .bell-count") == "1", "the assigned minister's bell shows 1 new, live")
+    b.click("#mine-btn")
+    b.wait_for_selector("dialog[open] .mine-list")
+    check("Tech" in b.inner_text("dialog .mine-list") and b.locator("dialog .mine-list .is-new").count() == 1,
+          "the bell lists the new assignment")
+    b.click('dialog .dialog-actions button[value="cancel"]')
+    b.wait_for_selector("#mine-btn .bell-count", state="hidden", timeout=5000)
+    check(True, "opening the list clears the count")
+    b.wait_for_timeout(1500)
+    b.reload()
+    b.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    b.wait_for_timeout(1500)
+    check(b.is_visible("#mine-btn") and not b.is_visible("#mine-btn .bell-count"), "seen assignments stay seen after a reload")
 
     # 5. Members list shows both; leader is an editor
     a.click("#account-btn")

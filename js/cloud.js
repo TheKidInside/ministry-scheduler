@@ -3,7 +3,7 @@
 // and signed out, exactly as before, from localStorage.
 //
 // Firestore layout (rules in firestore.rules):
-//   users/{uid}                          { churchId }
+//   users/{uid}                          { churchId, seen[] }
 //   churches/{churchId}                  { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name} }
 //   churches/{churchId}/{roles|people|series|services}/{docId}
 
@@ -105,6 +105,20 @@ export async function myChurchId(uid) {
   return snap.exists() ? snap.data().churchId || '' : '';
 }
 
+// The assignments you've already looked at (keys from model.assignmentKey), kept on your
+// own users/{uid} doc so the bell is the same on every device you use.
+export async function seenAssignments(uid) {
+  const { db, F } = await cloud();
+  const snap = await F.getDoc(F.doc(db, 'users', uid));
+  const seen = snap.exists() ? snap.data().seen : null;
+  return Array.isArray(seen) ? seen.filter(k => typeof k === 'string') : [];
+}
+
+export async function markAssignmentsSeen(uid, keys) {
+  const { db, F } = await cloud();
+  await F.setDoc(F.doc(db, 'users', uid), { seen: keys.slice(0, 500) }, { merge: true });
+}
+
 // Upload this browser's schedule as a new church, with you as its admin.
 export async function createChurch(user, state) {
   const { db, F } = await cloud();
@@ -116,7 +130,7 @@ export async function createChurch(user, state) {
     memberNames: { [user.uid]: displayName(user) },
     createdAt: F.serverTimestamp(),
   });
-  await F.setDoc(F.doc(db, 'users', user.uid), { churchId: ref.id });
+  await F.setDoc(F.doc(db, 'users', user.uid), { churchId: ref.id }, { merge: true });
   const store = new FirebaseStore(ref.id);
   await store.replaceAll(state, { wait: true });
   return ref.id;
@@ -143,7 +157,7 @@ export async function joinChurch(user, churchId) {
       throw err;
     }
   }
-  await F.setDoc(F.doc(db, 'users', user.uid), { churchId });
+  await F.setDoc(F.doc(db, 'users', user.uid), { churchId }, { merge: true });
   return churchId;
 }
 
@@ -156,7 +170,7 @@ export async function leaveChurch(uid, churchId = '') {
       [`memberNames.${uid}`]: F.deleteField(),
     });
   }
-  await F.setDoc(F.doc(db, 'users', uid), { churchId: '' });
+  await F.setDoc(F.doc(db, 'users', uid), { churchId: '' }, { merge: true });
 }
 
 export async function churchInfo(churchId) {

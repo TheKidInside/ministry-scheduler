@@ -117,6 +117,35 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round
 .rail-foot[data-state="synced"] .sync-dot { background: #7fc8a0; box-shadow: 0 0 0 3px rgb(127 200 160 / .18); }
 .rail-foot[data-state="signed-in"] .sync-dot { background: #cfae62; }
 
+/* your schedule: the bell sits just above the account button */
+.rail-bell {
+  margin: auto 0 0; padding: 10px 12px; border: 0; background: none; border-radius: 10px; cursor: pointer;
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; position: relative;
+  color: var(--rail-muted); font-weight: 500; letter-spacing: .01em;
+}
+.rail-bell[hidden] { display: none; }
+.rail-bell:not([hidden]) + .rail-foot { margin-top: 8px; }
+.rail-bell:hover { color: var(--rail-ink); background: rgb(255 255 255 / .04); }
+.rail-bell svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.bell-text { flex: 1; }
+.bell-count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center;
+  background: #cfae62; color: #121729; font-size: 11.5px; font-weight: 600; font-variant-numeric: lining-nums;
+}
+.bell-count[hidden] { display: none; }
+.mine-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.mine-list li { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); }
+.mine-list li.is-new { border-color: color-mix(in srgb, var(--gold) 60%, transparent); background: var(--gold-soft); }
+.mine-list .day-num { font-size: 32px; }
+.mine-list .day-dow { letter-spacing: .12em; white-space: nowrap; }
+.mine-body { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 14px; }
+.mine-roles { font-family: var(--display); font-size: 20px; font-weight: 600; color: var(--ink); }
+.new-tag { font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; font-weight: 600; color: var(--gold-ink); }
+.notify-list li { flex-wrap: wrap; }
+.notify-who { flex: 1; min-width: 140px; display: grid; gap: 2px; }
+.notify-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.notify-actions a { text-decoration: none; color: inherit; }
+
 /* account dialog */
 .account .lead { margin: 0; font-family: var(--display); font-size: 19px; line-height: 1.4; color: var(--ink-2); }
 .wide-btn { width: 100%; }
@@ -390,6 +419,15 @@ dialog::backdrop { background: rgb(9 12 23 / .5); backdrop-filter: blur(2px); }
 .role-field { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: start; }
 .role-label { font-weight: 600; font-size: 13.5px; padding-top: 11px; }
 .role-selects { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.setlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; counter-reset: song; }
+.setlist:empty { display: none; }
+.song-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 92px auto auto; gap: 8px; align-items: center; counter-increment: song; }
+.song-row::before { content: counter(song); font-family: var(--display); font-size: 20px; font-weight: 600; color: var(--gold-ink); text-align: right; font-variant-numeric: lining-nums; }
+.song-row:first-child [data-song="up"] { visibility: hidden; }
+.song-row .icon-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.songs-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.songs-tag::before { content: '\266A'; color: var(--gold-ink); }
+.mine-songs { font-size: 13px; color: var(--ink-2); }
 .conflicts:empty { display: none; }
 .conflicts { padding: 12px 16px; border-radius: var(--radius-sm); background: var(--warn-soft); color: var(--warn); font-size: 14px; border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
 .conflicts ul { margin: 4px 0 0; padding-left: 18px; }
@@ -424,6 +462,9 @@ dialog::backdrop { background: rgb(9 12 23 / .5); backdrop-filter: blur(2px); }
   .brand { padding: 0; }
   .brand-text, .account-text, .tabs a span { display: none; }
   .rail-foot { justify-content: center; padding: 14px 0 4px; min-height: 44px; position: relative; }
+  .rail-bell { justify-content: center; padding: 12px 0; }
+  .bell-text { display: none; }
+  .bell-count { position: absolute; top: 4px; left: calc(50% + 4px); }
   .sync-icon { display: block; }
   .rail-foot .sync-dot { position: absolute; top: 14px; left: calc(50% + 6px); width: 7px; height: 7px; }
   .tabs a { justify-content: center; padding: 12px; }
@@ -446,6 +487,9 @@ dialog::backdrop { background: rgb(9 12 23 / .5); backdrop-filter: blur(2px); }
   .brand-text { display: block; flex: 1; min-width: 0; }
   .rail-foot { margin: 0; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 1px solid rgb(207 174 98 / .3); border-radius: 50%; flex: none; }
   .rail-foot .sync-dot { top: 9px; left: auto; right: 8px; }
+  .rail-bell { margin: 0; width: 44px; height: 44px; padding: 0; justify-content: center; border: 1px solid rgb(207 174 98 / .3); border-radius: 50%; flex: none; }
+  .rail-bell:not([hidden]) + .rail-foot { margin-top: 0; }
+  .bell-count { top: -4px; left: auto; right: -4px; }
   .account-text { display: none; }
   .mark { width: 34px; height: 34px; }
   .church { font-size: 19px; }
@@ -464,6 +508,11 @@ dialog::backdrop { background: rgb(9 12 23 / .5); backdrop-filter: blur(2px); }
   .row2, .row3 { grid-template-columns: 1fr; }
   .role-field { grid-template-columns: 1fr; gap: 6px; }
   .role-label { padding-top: 0; }
+  /* phone: the title gets the whole line; key and buttons sit beneath it */
+  .song-row { grid-template-columns: 18px minmax(0, 1fr) auto auto; gap: 6px 8px; }
+  .song-row input { grid-column: 2 / -1; }
+  .song-row select { grid-column: 2; max-width: 120px; }
+  .song-row + .song-row { padding-top: 10px; border-top: 1px solid var(--line); }
   .section-head { margin-top: 36px; }
   .toast { left: 50%; bottom: calc(88px + env(safe-area-inset-bottom)); }
 

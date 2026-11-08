@@ -55,11 +55,12 @@ and the Firebase plug goes in instead, without rewiring the house.
 state
  ├─ settings   { churchName, defaultDay, defaultTime, serviceName }
  ├─ roles      [{ id:'preacher', name:'Preacher', slots:1 }, ...]   ← the schedule columns
- ├─ people     [{ id, name, contact, roleIds:[...], unavailable:['2026-11-15'] }]
+ ├─ people     [{ id, name, contact (phone), email, roleIds:[...], unavailable:['2026-11-15'] }]
  ├─ series     [{ id, name, color, start, end, description }]
  └─ services   [{ id, date:'2026-11-15', time, name,
                   assignments: { 'worship-team': ['p1','p3'], preacher: ['p10'] },
                   sermon: { title, scripture, seriesId },
+                  setlist: [{ title:'Amazing Grace', key:'G' }, ...],
                   notes }]
 ```
 
@@ -131,6 +132,8 @@ dialog open (for example when the series end date is before its start).
 - **`seriesPart` / `monthSeries`**: the "Part 3 of 6" numbering and the month legend on the Preaching tab.
 - **`remove…Everywhere`**: deleting a person, role or series also cleans every service, so no ghost IDs are left. Services that didn't change keep the same object, so only real changes get saved.
 - **`normalizeState`**: checks an imported backup file and fills in anything missing.
+- **Setlist**: `SONG_KEYS` (the key dropdown), `songLabel` ("Amazing Grace (G)"), and `songLibrary`, every song sung so far with the key it was last sung in. The library feeds the title suggestions and fills in the key when you pick a song you've sung before.
+- **Letting people know**: `addedAssignments(before, after)` finds who a save put on a service (moving the date counts everyone as new). `assignmentMessage` writes the text sent to them. `findPersonByEmail` links a sign-in to a minister (it also reads an email left in the old "Phone or email" field). `upcomingFor` gives your upcoming assignments, each with keys like `svc_x:tech:2026-11-15`, which is how the bell remembers what you've seen.
 
 ### 3.2 [js/store.js](../js/store.js) — the socket
 
@@ -160,7 +163,14 @@ three months) so the screens explain themselves. It sets `settings.seeded`, so
 Editors: `openServiceEditor`, `openPersonEditor`, `openSeriesEditor`. The service
 editor recomputes conflicts on every change, so the warning box updates while you
 pick people. In each role dropdown, people who can serve are listed first, with
-"(away)" and "(2× this month)" hints.
+"(away)" and "(2× this month)" hints. Its **Setlist** section has a row per song
+(title, key, move up, remove); the rows are read back in order by `readServiceForm`.
+
+**Notifications, with no server.** Two halves:
+1. *The person assigning.* When a save puts someone new on a service, `openNotify` opens "Let them know": one row per person with **Send** (the phone's share sheet, so Messenger, Viber, SMS and the rest), **Text** (when the profile has a phone) and **Email** (when it has an email). On a computer, Send becomes **Copy**.
+2. *The person assigned.* Signed in to a church, the bell (`#mine-btn`) finds the minister whose email matches your sign-in (`me()`) and counts upcoming assignments you haven't opened (`renderMineButton`). A new one arriving live also shows a toast. Opening the list (`openMine`) marks them seen in `users/{uid}.seen`, so the count is the same on every device.
+
+Neither half can reach a phone while the app is closed. That needs a server (see Part 6).
 
 The URL hash holds the tab and month (`#/preaching/2026-11`), so a link or
 bookmark opens the same view.
@@ -202,5 +212,5 @@ editors open as bottom sheets; on desktop they slide in from the right.
 ## Part 6 — What's deliberately left out (and where it'd go)
 
 - **Firebase sync / logins**: built. `FirebaseStore` lives in `js/cloud.js` and has the same methods as `LocalStore`. `app.js` swaps `store` when you sign in to a church (`useStore`/`useChurch`). How it works, the rules and the emulator test are in [FIREBASE.md](FIREBASE.md).
-- **Notifications (email/SMS reminders, accept/decline)**: need a server. These come after Firebase, using Cloud Functions.
+- **Notifications**: in-app (the bell) and share-to-message are built and need no server. **Push notifications and automatic email/SMS reminders** (including accept/decline) reach people while the app is closed, so they need a Cloud Function, and that needs the Firebase Blaze plan.
 - **Offline install (service worker)**: left out so every push shows up straight away. Add one when the app settles.

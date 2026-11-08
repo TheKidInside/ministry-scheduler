@@ -83,12 +83,46 @@ with sync_playwright() as p:
     filled = page.eval_on_selector_all('dialog select[name^="role:"]', "els => els.filter(e => e.value).length")
     check(filled >= 5, f"auto-fill picks people for open slots ({filled})")
     page.click('dialog .dialog-actions button[value="save"]')
+    page.wait_for_selector("dialog[open] .notify-list")
+    check(page.locator("dialog .notify-list li").count() >= 5, "saving new assignments offers to message each person")
+    page.locator("dialog [data-notify]").first.click()
+    check("you're on" in page.evaluate("navigator.clipboard.readText()"), "the message names their role and the date")
+    page.click('dialog .dialog-actions button[value="cancel"]')
     check(page.locator(".matrix tbody tr").count() == before + 1, "new service appears in the month")
+    check(not page.is_visible("#mine-btn"), "signed out, there is no bell")
+
+    # setlist: add a song with a key, move it to the top, and it shows on the schedule
+    page.locator(".matrix tbody tr").first.click()
+    page.wait_for_selector("dialog[open]")
+    songs = page.locator("dialog .song-row").count()
+    page.click('dialog [data-song="add"]')
+    page.locator("dialog .song-row").last.locator('input[name="song-title"]').fill("E2E Hymn")
+    page.locator("dialog .song-row").last.locator('select[name="song-key"]').select_option("Bb")
+    page.locator("dialog .song-row").last.locator('input[name="song-title"]').press("Enter")
+    check(page.locator("dialog[open]").count() == 1 and page.locator("dialog .song-row").count() == songs + 2,
+          "Enter in a song title starts the next song instead of saving")
+    for i in range(songs, 0, -1):  # the new song moves up one place per tap
+        page.locator("dialog .song-row").nth(i).locator('[data-song="up"]').click()
+    page.click('dialog .dialog-actions button[value="save"]')
+    check(not page.locator("dialog[open]").count(), "a setlist-only change saves without asking to message anyone")
+    tag = page.locator(".matrix tbody tr").first.locator(".songs-tag")
+    check(tag.inner_text() == f"{songs + 1} songs", f"the schedule shows the song count ({tag.inner_text()})")
+    page.locator(".matrix tbody tr").first.click()
+    page.wait_for_selector("dialog[open]")
+    first = page.locator("dialog .song-row").first
+    check(first.locator('input[name="song-title"]').input_value() == "E2E Hymn"
+          and first.locator('select[name="song-key"]').input_value() == "Bb", "the song keeps its place and key")
+    page.locator("dialog .song-row").nth(1).locator('[data-song="remove"]').click()
+    page.click('dialog .dialog-actions button[value="save"]')
+    check(tag.inner_text() == f"{songs} songs", "removing a song saves")
+    page.click('[data-action="copy-roster"]')
+    check("Setlist: E2E Hymn (Bb)" in page.evaluate("navigator.clipboard.readText()"), "the copied roster includes the setlist")
 
     # add a minister
     page.click('[data-tab="ministers"]')
     page.click('[data-action="new-person"]')
     page.fill('dialog input[name="name"]', "Zed Tester")
+    page.fill('dialog input[name="email"]', "zed@example.com")
     page.check('dialog input[name="roles"][value="tech"]')
     page.fill('dialog input[name="away"]', "2030-01-05")
     page.click('dialog [data-local="add-date"]')
@@ -96,6 +130,12 @@ with sync_playwright() as p:
     page.click('dialog .dialog-actions button[value="save"]')
     card = page.locator(".person", has_text="Zed Tester")
     check(card.count() == 1 and "Tech" in card.inner_text(), "new minister shows with their role")
+    page.click('[data-action="new-person"]')
+    page.fill('dialog input[name="name"]', "Zed Twin")
+    page.fill('dialog input[name="email"]', "ZED@example.com")
+    page.click('dialog .dialog-actions button[value="save"]')
+    check(page.locator("dialog[open]").count() == 1, "two ministers can't share one email")
+    page.click('dialog button[value="cancel"]')
 
     # a new series tags untagged services in its range
     page.click('[data-tab="series"]')

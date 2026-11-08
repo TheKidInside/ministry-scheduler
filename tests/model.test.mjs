@@ -150,3 +150,54 @@ test('normalizeState coerces hostile shapes instead of saving them', () => {
   assert.equal(s.settings.seeded, true);
   assert.doesNotThrow(() => M.serviceConflicts(s, s.services[0]));
 });
+
+test('a sign-in email finds its minister, including emails kept in the old contact field', () => {
+  const people = [
+    { id: 'a', name: 'Ana', email: 'Ana@Example.com', contact: '' },
+    { id: 'b', name: 'Ben', contact: ' ben@example.com ' },
+    { id: 'c', name: 'Cy', contact: '+63 917 555 0101' },
+  ];
+  assert.equal(M.findPersonByEmail(people, 'ana@example.COM').id, 'a');
+  assert.equal(M.findPersonByEmail(people, 'BEN@example.com').id, 'b');
+  assert.equal(M.findPersonByEmail(people, ''), null);
+  assert.equal(M.personPhone(people[2]), '+639175550101');
+  assert.equal(M.personPhone(people[1]), '');
+  assert.equal(M.normalizeState({ people: [{ id: 'x', name: 'X', email: ' X@Y.com ' }] }).people[0].email, 'x@y.com');
+});
+
+test('addedAssignments reports only people newly put on a service', () => {
+  const before = { ...M.newService({ date: '2026-11-01' }), assignments: { tech: ['b'], preacher: ['c'] } };
+  const after = { ...before, assignments: { tech: ['b', 'a'], preacher: ['c'], 'worship-team': ['b'] } };
+  const added = M.addedAssignments(before, after);
+  assert.deepEqual([...added.entries()], [['a', ['tech']], ['b', ['worship-team']]]);
+  assert.equal(M.addedAssignments(before, before).size, 0);
+  assert.equal(M.addedAssignments(null, before).size, 2);
+  assert.equal(M.addedAssignments(before, { ...before, date: '2026-11-08' }).size, 2, 'a new date is news for everyone');
+});
+
+test('upcoming assignments carry keys that change when the date moves', () => {
+  const s = base();
+  const svc = { ...M.newService({ date: '2026-11-08', time: '09:30' }), assignments: { tech: ['b'], 'worship-team': ['b'] } };
+  s.services = [svc];
+  const up = M.upcomingFor(s, 'b', '2026-11-01');
+  assert.equal(up.length, 1);
+  assert.deepEqual(up[0].keys, [`${svc.id}:worship-team:2026-11-08`, `${svc.id}:tech:2026-11-08`]);
+  assert.equal(M.upcomingFor(s, 'b', '2026-11-09').length, 0);
+  const msg = M.assignmentMessage(s, { name: 'Ben Cruz' }, svc, ['worship-team', 'tech'], 'https://x.test/');
+  assert.match(msg, /^Hi Ben, you're on Worship Team and Tech \(Sound & Slides\) for Sunday Service on Sunday 8 November, 09:30\./);
+  assert.match(msg, /Your schedule: https:\/\/x\.test\//);
+});
+
+test('setlists are cleaned on load, remembered as a library, and printed in the roster', () => {
+  const s = M.normalizeState({ services: [
+    { id: 'x1', date: '2026-11-01', setlist: [{ title: ' Amazing Grace ', key: 'G' }, { title: '' }, null, { title: 'Be Thou My Vision' }] },
+    { id: 'x2', date: '2026-11-08', setlist: [{ title: 'amazing grace', key: 'A' }] },
+    { id: 'x3', date: '2026-11-15' },
+  ] });
+  assert.deepEqual(s.services[0].setlist, [{ title: 'Amazing Grace', key: 'G' }, { title: 'Be Thou My Vision', key: '' }]);
+  assert.deepEqual(s.services[2].setlist, []);
+  const lib = M.songLibrary(s.services);
+  assert.deepEqual(lib.map(x => [x.title, x.key, x.times]), [['amazing grace', 'A', 2], ['Be Thou My Vision', '', 1]]);
+  assert.match(M.rosterText(s, 2026, 11), /Setlist: Amazing Grace \(G\), Be Thou My Vision/);
+  assert.deepEqual(M.newService({ date: '2026-11-01' }).setlist, []);
+});

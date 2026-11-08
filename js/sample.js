@@ -39,6 +39,13 @@ const SERMONS_B = [
   ['Under His Wings', 'Psalm 91:1-16'],
 ];
 
+// Public-domain hymns, with common keys.
+const SONGS = [
+  ['Holy, Holy, Holy', 'D'], ['Amazing Grace', 'G'], ['Be Thou My Vision', 'Eb'], ['It Is Well with My Soul', 'C'],
+  ['Come Thou Fount', 'D'], ['Great Is Thy Faithfulness', 'D'], ['All Hail the Power of Jesus’ Name', 'G'],
+  ['Crown Him with Many Crowns', 'D'], ['How Firm a Foundation', 'G'], ['Blessed Assurance', 'D'],
+];
+
 export function sampleState(now = new Date()) {
   const state = emptyState();
   state.settings.churchName = 'Grace Community Church';
@@ -78,6 +85,7 @@ export function sampleState(now = new Date()) {
     const [title, scripture] = list[counters[sid]++ % list.length] || ['', ''];
     const withPreacher = { ...svc, assignments: { preacher: [preachers[i % preachers.length]] }, sermon: { ...svc.sermon, title, scripture } };
     const filled = autoFill(state, withPreacher);
+    filled.setlist = [0, 1, 2, 3].map(k => SONGS[(i * 3 + k) % SONGS.length]).map(([title, key]) => ({ title, key }));
     state.services[i] = filled; // later services see earlier loads when balancing
     return filled;
   });
