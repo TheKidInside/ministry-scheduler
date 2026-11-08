@@ -15,6 +15,7 @@ the logic. Read it next to the code; every section links to the file it describe
 ```
 start.cmd                         # serves on http://localhost:8795/ and opens the browser
 node --test tests/model.test.mjs  # logic tests (no browser)
+py -3 tests\cloud_e2e.py          # two-device sync test against the Firebase emulators (see FIREBASE.md)
 py -3 tests\e2e.py                # clicks through the real UI in headless Chromium (server must be running)
 ```
 
@@ -31,7 +32,8 @@ imports from files.
 ```
   LOGIC     js/model.js     the church's rules: dates, conflicts, auto-fill, series parts
     │
-  STORAGE   js/store.js     where data lives (localStorage today, Firebase later)
+  STORAGE   js/store.js     where data lives: localStorage (LocalStore)
+            js/cloud.js     ...or Firestore when signed in to a church (FirebaseStore)
     │
   UI        js/app.js       draws the screens, handles clicks, opens the editors
             index.html, css/styles.css
@@ -44,8 +46,8 @@ browser.
 
 **The second rule: `app.js` never touches `localStorage` for schedule data.** It only
 calls the store's methods (`putDoc`, `deleteDoc`, `replaceAll`...). Think of the store
-as a power socket: today a localStorage plug is in it, and later you swap in a
-Firebase plug without rewiring the house.
+as a power socket: signed out, the localStorage plug is in it; sign in to a church
+and the Firebase plug goes in instead, without rewiring the house.
 
 ### 1.2 The data, in one picture
 
@@ -136,7 +138,7 @@ dialog open (for example when the series end date is before its start).
 async on purpose, even though localStorage is instant, because Firestore isn't, and
 the app is already written to `await` them. Each write returns `true`/`false` so the
 app can warn you when the browser isn't keeping data (private windows).
-`subscribe()` listens for saves from another tab. A Firebase store will use the same
+`subscribe()` listens for saves from another tab. The Firebase store uses the same
 hook for live updates from other devices.
 
 ### 3.3 [js/sample.js](../js/sample.js) — the demo church
@@ -199,6 +201,6 @@ editors open as bottom sheets; on desktop they slide in from the right.
 
 ## Part 6 — What's deliberately left out (and where it'd go)
 
-- **Firebase sync / logins**: write a `FirebaseStore` in `store.js` with the same methods. The plan is in [FIREBASE.md](FIREBASE.md).
+- **Firebase sync / logins**: built. `FirebaseStore` lives in `js/cloud.js` and has the same methods as `LocalStore`. `app.js` swaps `store` when you sign in to a church (`useStore`/`useChurch`). How it works, the rules and the emulator test are in [FIREBASE.md](FIREBASE.md).
 - **Notifications (email/SMS reminders, accept/decline)**: need a server. These come after Firebase, using Cloud Functions.
 - **Offline install (service worker)**: left out so every push shows up straight away. Add one when the app settles.

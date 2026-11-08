@@ -12,7 +12,7 @@ Plan who serves each Sunday, and see the month's preaching by sermon series.
 - **Series**: sermon series with dates, a colour and a description. Services in the date range pick up the series automatically.
 - **Settings**: church name, usual service day and time, roles, light/dark theme, and backup export/import.
 
-Data is stored in the browser for now. [Firebase sync](docs/FIREBASE.md) is planned, and the storage layer is already built so it can be swapped.
+Signed out, data stays in the browser. Sign in to put your church online, then share the invite link: everyone on the team sees and edits the same schedule live, on any device ([how it works](docs/FIREBASE.md)).
 
 ## Run locally
 

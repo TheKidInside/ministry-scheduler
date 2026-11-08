@@ -1,10 +1,13 @@
-// UI: routing, rendering and event wiring. Data rules live in model.js, storage in store.js.
+// UI: routing, rendering and event wiring. Data rules live in model.js, storage in store.js,
+// Firebase sign-in and sync in cloud.js (loaded only when needed).
 
 import * as M from './model.js';
 import { createStore } from './store.js';
 import { sampleState } from './sample.js';
 
-const store = createStore();
+const localStore = createStore();
+let store = localStore;          // swapped for a FirebaseStore when you sign in to a church
+let unsubscribe = () => {};
 const TABS = ['schedule', 'preaching', 'ministers', 'series', 'settings'];
 const MONTH_TABS = new Set(['schedule', 'preaching', 'ministers']);
 const THEME_KEY = 'ministry-scheduler:theme';
@@ -47,7 +50,7 @@ async function deleteDoc(collection, id) {
 
 async function replaceAll(next) {
   afterWrite(await store.replaceAll(next));
-  state = await store.load();
+  state = isCloud() ? M.normalizeState(structuredClone(next)) : await store.load();
 }
 
 // Write back only the services a bulk change actually touched.
@@ -94,6 +97,7 @@ function render() {
   el.innerHTML = views[view.tab]();
   if (el.dataset.view !== view.tab) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); }
   el.dataset.view = view.tab;
+  renderAccountButton();
 }
 
 function emptyState(title, body, action = '') {
@@ -321,7 +325,9 @@ function renderSettings() {
     </section>
     <section class="panel">
       <h2>Your data</h2>
-      <p class="muted">Everything is saved in this browser only. Export a backup now and then; Firebase sync across devices is planned.</p>
+      <p class="muted">${isCloud()
+        ? 'Synced online: everyone in this church sees the same schedule. A backup is still worth exporting now and then.'
+        : 'Saved in this browser only. To share it with your team across devices, tap the sync button (bottom of the menu, or top right on a phone). Export a backup now and then.'}</p>
       <div class="row-actions">
         <button type="button" class="btn" data-action="export">Export backup</button>
         <label class="btn">Import backup<input type="file" accept="application/json,.json" id="import-file" hidden></label>
@@ -685,13 +691,333 @@ function exportBackup() {
 async function importBackup(file) {
   try {
     const next = M.normalizeState(JSON.parse(await file.text()));
-    if (!confirm(`Replace everything with this backup? (${next.services.length} services, ${next.people.length} ministers)`)) return;
+    if (!confirm(`Replace everything${isCloud() ? ' for everyone in this church' : ''} with this backup? (${next.services.length} services, ${next.people.length} ministers)`)) return;
     await replaceAll(next);
     toast('Backup imported.');
     render();
   } catch (err) {
     toast(`Could not import: ${err.message}`, 'warn');
   }
+}
+
+// ---------- cloud sync (Firebase) ----------
+
+// What the account button and dialog show. `store` is LocalStore until you sign in
+// to a church; then it is that church's FirebaseStore.
+const cloudState = { ready: false, user: null, churchId: '', info: null, error: '', reopen: false };
+const JOIN_KEY = 'ministry-scheduler:join';
+const inviteLink = id => `${location.origin}${location.pathname}#join=${id}`;
+const isCloud = () => Boolean(cloudState.churchId);
+let loadSeq = 0;          // each store switch gets a number; a slower, older load is thrown away
+let opening = '';         // church id being opened right now (auth can fire twice)
+let removedNotice = false;
+
+const session = {
+  get: () => { try { return sessionStorage.getItem(JOIN_KEY) || ''; } catch { return ''; } },
+  set: v => { try { sessionStorage.setItem(JOIN_KEY, v); } catch { /* private mode: invite kept in memory */ } session.mem = v; },
+  clear: () => { try { sessionStorage.removeItem(JOIN_KEY); } catch { /* ignore */ } session.mem = ''; },
+  mem: '',
+};
+const pendingInvite = () => session.get() || session.mem;
+
+// Load first, switch second: a load that was overtaken (sign-out, another church) is discarded.
+async function useStore(next) {
+  const seq = ++loadSeq;
+  const loaded = await next.load();
+  if (seq !== loadSeq) return false;
+  unsubscribe();
+  store = next;
+  state = loaded;
+  unsubscribe = store.subscribe(s => { state = s; if (!dialog().open) render(); });
+  render();
+  return true;
+}
+
+async function useLocal() {
+  cloudState.churchId = '';
+  cloudState.info = null;
+  await useStore(localStore);
+}
+
+async function useChurch(churchId) {
+  if (!churchId || churchId === cloudState.churchId || churchId === opening) return;
+  opening = churchId;
+  const C = await import('./cloud.js');
+  try {
+    if (await useStore(new C.FirebaseStore(churchId, { onError: cloudError }))) {
+      cloudState.churchId = churchId;
+      removedNotice = false;
+      cloudState.info = await C.churchInfo(churchId).catch(() => null);
+    }
+  } catch (err) {
+    // Only a definite "you're not in this church" unlinks you; being offline must not.
+    const gone = /permission-denied|not-found/.test(err.code || '');
+    if (gone && cloudState.user) await C.leaveChurch(cloudState.user.uid).catch(() => {});
+    toast(gone ? 'You are no longer in that church. Showing this browser\'s copy.' : `Could not open your church: ${err.message || err}`, 'warn');
+  } finally {
+    opening = '';
+  }
+  render();
+}
+
+async function cloudError(err) {
+  const denied = /permission-denied/.test(err.code || '');
+  if (denied && isCloud()) {
+    // Removed from the church while using it: drop back to this browser's copy, once.
+    if (removedNotice) return;
+    removedNotice = true;
+    const C = await import('./cloud.js');
+    if (cloudState.user) await C.leaveChurch(cloudState.user.uid).catch(() => {});
+    await useLocal();
+    toast('You are no longer a member of that church. Showing this browser\'s copy.', 'warn');
+    return;
+  }
+  toast(`Not saved to the cloud: ${err.message || err}`, 'warn');
+}
+
+function accountLabel() {
+  if (!cloudState.ready) return 'Saved in this browser';
+  if (isCloud()) return `Synced · ${state.settings.churchName}`;
+  if (cloudState.user) return 'Signed in · this browser only';
+  return 'Saved in this browser · Sign in to sync';
+}
+
+function renderAccountButton() {
+  const btn = $('#account-btn');
+  if (!btn) return;
+  const label = accountLabel();
+  btn.querySelector('.account-text').textContent = label;
+  btn.setAttribute('aria-label', `Account and sync: ${label}`);
+  btn.title = label;
+  btn.dataset.state = isCloud() ? 'synced' : cloudState.user ? 'signed-in' : 'local';
+}
+
+async function initCloud() {
+  const C = await import('./cloud.js');
+  if (!C.cloudConfigured()) return;
+  try {
+    await C.onAuth(async user => {
+      cloudState.user = user;
+      cloudState.ready = true;
+      if (!user) { if (isCloud()) await useLocal(); else loadSeq++; renderAccountButton(); return; }
+      const current = await C.myChurchId(user.uid).catch(() => '');
+      const invite = pendingInvite();
+      if (invite) {
+        session.clear();
+        const joined = await acceptInvite(invite, current);
+        if (joined) return;
+      }
+      if (current) await useChurch(current);
+      renderAccountButton();
+      // Just signed in from the dialog and not in a church yet: show the next step.
+      if (cloudState.reopen) { cloudState.reopen = false; if (!isCloud() && !dialog().open) openAccount(); }
+    });
+  } catch (err) {
+    cloudState.error = err.message || String(err);
+  }
+  renderAccountButton();
+}
+
+// Returns true when you end up in the invited church.
+async function acceptInvite(churchId, currentId = cloudState.churchId) {
+  if (currentId === churchId) { await useChurch(churchId); return true; }
+  if (currentId && !confirm('You are already in a church in this app. Leave it and join the one in this invite?')) return false;
+  const C = await import('./cloud.js');
+  try {
+    await C.joinChurch(cloudState.user, churchId);
+    cloudState.churchId = '';
+    await useChurch(churchId);
+    toast(`You joined ${state.settings.churchName}.`);
+    return true;
+  } catch (err) {
+    toast(err.message || 'That invite link did not work.', 'warn');
+    return false;
+  }
+}
+
+// An invite link (#join=<churchId>) is kept until you have signed in.
+function readInvite() {
+  const m = location.hash.match(/^#join=([A-Za-z0-9]{10,40})$/);
+  if (!m) return false;
+  session.set(m[1]);
+  history.replaceState(null, '', location.pathname);
+  return true;
+}
+
+// An invite opened in a tab that already has the app open.
+async function onInviteHash() {
+  if (!readInvite()) return false;
+  if (!cloudState.ready) { toast('Cloud sync is not switched on here, so the invite cannot be used yet.', 'warn'); return true; }
+  if (!cloudState.user) { openAccount(); return true; }
+  const invite = pendingInvite();
+  session.clear();
+  await acceptInvite(invite);
+  return true;
+}
+
+const isUntouchedSample = () => state.settings.churchName === 'Grace Community Church' && state.people.some(p => p.name === 'Pastor Jon');
+
+function membersHtml(info) {
+  const me = cloudState.user?.uid;
+  if (!info) return '<li class="muted">Loading…</li>';
+  const admin = info.members[me] === 'admin';
+  return Object.entries(info.members).sort((a, b) => (a[1] === 'admin' ? -1 : 0) - (b[1] === 'admin' ? -1 : 0))
+    .map(([uid, role]) => `<li><span class="mono" aria-hidden="true">${esc(initials(info.memberNames[uid] || '?'))}</span>
+      <span class="member-name">${esc(info.memberNames[uid] || 'Member')}${uid === me ? ' <span class="muted">(you)</span>' : ''}</span>
+      <span class="member-role">${role === 'admin' ? 'Admin' : 'Editor'}</span>
+      ${admin && uid !== me && role !== 'admin' ? `<button type="button" class="btn small" data-promote-member="${esc(uid)}">Make admin</button>` : ''}
+      ${admin && uid !== me ? `<button type="button" class="btn small danger" data-remove-member="${esc(uid)}">Remove</button>` : ''}</li>`).join('');
+}
+
+function openAccount() {
+  const { user } = cloudState;
+  const head = dialogHead(isCloud() ? state.settings.churchName : 'Sync across devices',
+    user ? `Signed in as ${user.email || user.displayName}` : '');
+  let body;
+  let actions = '';
+  if (!cloudState.ready) {
+    body = `<p>${cloudState.error ? esc(cloudState.error) : 'Cloud sync is not switched on for this app yet.'} Your schedule is saved in this browser.</p>`;
+  } else if (!user) {
+    body = `
+      <p class="lead">${pendingInvite() ? 'Sign in to accept your invite.' : 'Sign in so the pastor, worship leader and tech team all see and edit the same schedule, on any phone or computer.'}</p>
+      <button type="submit" class="btn primary wide-btn" value="google">Continue with Google</button>
+      <div class="or"><span>or use email</span></div>
+      <label>Email <input name="email" type="email" autocomplete="email" inputmode="email"></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" minlength="6"></label>
+      <p class="form-error" aria-live="polite"></p>
+      <div class="row-actions">
+        <button type="submit" class="btn" value="signin">Sign in</button>
+        <button type="submit" class="btn ghost" value="create">Create account</button>
+        <button type="submit" class="btn ghost" value="reset">Forgot password</button>
+      </div>`;
+  } else if (!isCloud()) {
+    const sample = isUntouchedSample();
+    body = `
+      <section class="choice">
+        <h3>Start your church online</h3>
+        <p class="muted">${sample
+          ? 'This browser still holds the sample church. Start empty, or upload the sample to try things out.'
+          : `Uploads what this browser has now (${state.services.length} services, ${state.people.length} ministers).`}
+          You become the admin and can invite your team.</p>
+        <div class="row-actions">
+          <button type="submit" class="btn primary" value="${sample ? 'upload-empty' : 'upload'}">${sample ? 'Start empty' : 'Put it online'}</button>
+          <button type="submit" class="btn ghost" value="${sample ? 'upload' : 'upload-empty'}">${sample ? 'Upload the sample' : 'Start empty instead'}</button>
+        </div>
+      </section>
+      <section class="choice">
+        <h3>Join a church</h3>
+        <p class="muted">Paste the invite link someone sent you.</p>
+        <input name="invite" placeholder="Invite link" autocomplete="off">
+        <button type="submit" class="btn" value="join">Join</button>
+      </section>
+      <p class="form-error" aria-live="polite"></p>`;
+    actions = '<button type="submit" class="btn ghost" value="signout">Sign out</button>';
+  } else {
+    const admin = cloudState.info?.members?.[user.uid] === 'admin';
+    body = `
+      <p class="lead">Every change is shared live with everyone in this church, and kept on this device for when you are offline.</p>
+      <label>Invite link <span class="copy-row"><input id="invite-link" readonly value="${esc(inviteLink(cloudState.churchId))}"><button type="button" class="btn" data-local="copy-invite">Copy</button></span></label>
+      <p class="muted small">Anyone with this link can join and edit the schedule. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
+      <fieldset><legend>Members</legend><ul class="members">${membersHtml(cloudState.info)}</ul></fieldset>
+      <p class="form-error" aria-live="polite"></p>`;
+    actions = `<button type="submit" class="btn ghost" value="signout">Sign out</button>
+      ${admin ? '' : '<button type="submit" class="btn ghost danger" value="leave" formnovalidate>Leave church</button>'}`;
+  }
+  openDialog(head + `<div class="dialog-body account">${body}</div>
+    <footer class="dialog-actions">${actions}<span class="spacer"></span><button class="btn" value="cancel" formnovalidate>Close</button></footer>`, {
+    onMount(form) {
+      // Members change when someone joins: fetch the current list each time this opens.
+      const refresh = () => import('./cloud.js').then(C => C.churchInfo(cloudState.churchId)).then(fresh => {
+        if (!fresh) return;
+        cloudState.info = fresh;
+        const ul = $('.members', form);
+        if (ul) ul.innerHTML = membersHtml(fresh);
+      }).catch(() => {});
+      if (isCloud()) refresh();
+      form.addEventListener('click', async e => {
+        if (e.target.closest('[data-local="copy-invite"]')) {
+          const input = $('#invite-link', form);
+          try { await navigator.clipboard.writeText(input.value); toast('Invite link copied.'); } catch { input.select(); }
+        }
+        const names = cloudState.info?.memberNames || {};
+        const remove = e.target.closest('[data-remove-member]')?.dataset.removeMember;
+        const promote = e.target.closest('[data-promote-member]')?.dataset.promoteMember;
+        if (!remove && !promote) return;
+        const C = await import('./cloud.js');
+        try {
+          if (remove && confirm(`Remove ${names[remove] || 'this member'} from the church? They won't be able to rejoin with the invite link.`)) {
+            await C.removeMember(cloudState.churchId, remove);
+          } else if (promote && confirm(`Make ${names[promote] || 'this member'} an admin? Admins can add and remove members.`)) {
+            await C.setRole(cloudState.churchId, promote, 'admin');
+          } else return;
+          await refresh();
+        } catch (err) { toast(err.message, 'warn'); }
+      });
+    },
+    async onSubmit(form, action) {
+      const C = await import('./cloud.js');
+      // Enter in a field presses the hidden default button: treat it as the form's main action.
+      if (action === 'save') action = form.elements.email ? 'signin' : form.elements.invite?.value ? 'join' : 'none';
+      const error = msg => { const el = $('.form-error', form); if (el) el.textContent = msg; return true; };
+      const busy = on => $$('button', form).forEach(b => { b.disabled = on; });
+      const email = form.elements.email?.value.trim();
+      const password = form.elements.password?.value;
+      try {
+        busy(true);
+        switch (action) {
+          case 'google':
+            cloudState.reopen = true;
+            await C.signInGoogle();
+            toast('Signed in.');
+            return false;
+          case 'signin':
+          case 'create':
+            if (!email || !password) return error('Enter your email and a password.');
+            cloudState.reopen = true;
+            await C.signInEmail(email, password, action === 'create');
+            toast(action === 'create' ? 'Account created.' : 'Signed in.');
+            return false;
+          case 'reset':
+            if (!email) return error('Enter your email first.');
+            await C.resetPassword(email);
+            return error('Check your email for a link to set a new password.');
+          case 'upload':
+          case 'upload-empty': {
+            const data = action === 'upload' ? state
+              : { ...M.emptyState(), settings: { ...state.settings, churchName: isUntouchedSample() ? 'Our Church' : state.settings.churchName }, roles: state.roles };
+            const cid = await C.createChurch(cloudState.user, data);
+            await useChurch(cid);
+            toast('Your church is online. Copy the invite link to add your team.');
+            dialog().close();
+            openAccount();
+            return true;
+          }
+          case 'join': {
+            const m = (form.elements.invite.value || '').match(/(?:#join=)?([A-Za-z0-9]{10,40})\s*$/);
+            if (!m) return error('Paste the whole invite link.');
+            await acceptInvite(m[1]);
+            return false;
+          }
+          case 'leave':
+            if (!confirm('Leave this church? You will need a new invite to come back.')) return true;
+            await C.leaveChurch(cloudState.user.uid, cloudState.churchId);
+            await useLocal();
+            toast('You left the church. Showing this browser\'s copy.');
+            return false;
+          case 'signout':
+            await C.signOut();
+            toast('Signed out. This browser now shows its own copy.');
+            return false;
+          default: return false;
+        }
+      } catch (err) {
+        cloudState.reopen = false;
+        return error(C.authMessage(err));
+      } finally {
+        busy(false);
+      }
+    },
+  });
 }
 
 // ---------- theme ----------
@@ -757,13 +1083,14 @@ async function handleAction(el) {
       }
       return undefined;
     }
+    case 'account': return openAccount();
     case 'load-sample':
-      if (!confirm('Replace everything with the sample church? Export a backup first if you want to keep your data.')) return;
+      if (!confirm(`Replace everything${isCloud() ? ' for everyone in this church' : ''} with the sample church? Export a backup first if you want to keep your data.`)) return;
       await replaceAll(sampleState());
       toast('Sample data loaded.');
       return render();
     case 'clear-all':
-      if (!confirm('Delete every service, minister and series? This cannot be undone.')) return;
+      if (!confirm(`Delete every service, minister and series${isCloud() ? ' for everyone in this church' : ''}? This cannot be undone.`)) return;
       await replaceAll({ ...M.emptyState(), settings: { ...state.settings, seeded: true }, roles: state.roles });
       view.focus = '';
       toast('Everything cleared.');
@@ -808,10 +1135,9 @@ function wire() {
       render();
     }
   });
-  window.addEventListener('hashchange', () => { readHash(); render(); });
+  window.addEventListener('hashchange', async () => { if (await onInviteHash()) return; readHash(); render(); });
   // Every way a dialog closes (Save, Cancel, the X, Esc) redraws once, picking up any change.
   dialog().addEventListener('close', render);
-  store.subscribe(next => { state = next; if (!dialog().open) render(); });
 }
 
 async function init() {
@@ -823,9 +1149,14 @@ async function init() {
     sample.settings.seeded = true;
     await replaceAll(sample);
   }
+  const invited = readInvite();
   readHash();
   wire();
+  unsubscribe = store.subscribe(next => { state = next; if (!dialog().open) render(); });
   render();
+  await initCloud();
+  if (invited && !cloudState.ready) toast('Cloud sync is not switched on here, so the invite cannot be used yet.', 'warn');
+  else if (invited && !cloudState.user) openAccount();
 }
 
 init();

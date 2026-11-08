@@ -1,71 +1,85 @@
-# Firebase plan
+# Firebase sync
 
-The app already talks to storage only through the `Store` interface in
-[js/store.js](../js/store.js). Adding Firebase means writing a `FirebaseStore` class
-with the same methods and returning it from `createStore()`. The views don't change.
+Signed out, the app works as it always did: everything is saved in this browser
+(`LocalStore`). Signed in to a church, the same screens read and write Firestore
+(`FirebaseStore` in [js/cloud.js](../js/cloud.js)) and every device in that church
+sees changes live. The views don't know which store they're using.
 
-## 1. Firestore layout
+## How people use it
+
+1. **The first person** (say the pastor) taps the account button at the bottom of the
+   sidebar (on a phone, the round button at the top right) and signs in with Google or
+   email. They then choose **Put it online**, which uploads what their browser holds
+   and makes them the church's **admin**.
+2. They **copy the invite link** (`…#join=<churchId>`) from the same dialog and send it to
+   the team.
+3. **Each team member** opens the link, signs in, and lands in the same church as an
+   **editor**. Editors can change the schedule, sermons, people, series and settings.
+   Only the admin can remove members.
+4. **Signing out** returns that browser to its own local copy. The church stays online.
+
+Anyone holding the invite link can join, so it should only go to the ministry team.
+
+## Firestore layout
 
 ```
-churches/{churchId}                      settings fields + members: { uid: 'admin' | 'editor' | 'viewer' }
+users/{uid}                              { churchId }                       your church (one per account)
+churches/{churchId}                      { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name} }
 churches/{churchId}/roles/{roleId}       { name, slots, order }
-churches/{churchId}/people/{personId}    { name, contact, roleIds[], unavailable[], uid? }
+churches/{churchId}/people/{personId}    { name, contact, roleIds[], unavailable[] }
 churches/{churchId}/series/{seriesId}    { name, color, start, end, description }
 churches/{churchId}/services/{serviceId} { date, time, name, assignments{}, sermon{}, notes }
 ```
 
-A church is the unit of sharing, so the pastor, worship leader and tech lead all
-edit the same schedule. `people.uid` (optional) links a minister to a login, which
-later enables a "My schedule" view and accept/decline.
+## Store methods → Firestore
 
-## 2. Method mapping
-
-| Store method | Firestore call |
+| Store method | Firestore |
 |---|---|
-| `load()` | `getDocs` on the 4 collections + `getDoc` on the church doc, sort roles by `order` |
-| `putDoc(col, doc)` | `setDoc(doc(db, 'churches', id, col, doc.id), doc)` |
-| `deleteDoc(col, id)` | `deleteDoc(...)` |
-| `putSettings(s)` | `setDoc(churchRef, { settings: s }, { merge: true })` |
-| `replaceAll(state)` | `writeBatch`: delete what's gone, set the rest (≤ 500 ops per batch) |
-| `subscribe(cb)` | `onSnapshot` on each collection; rebuild state, call `cb(state)` |
+| `load()` | `getDoc` on the church + `getDocs` on the 4 collections |
+| `putDoc(col, doc)` | `setDoc`, without waiting for the server |
+| `deleteDoc(col, id)` | `deleteDoc`, without waiting |
+| `putSettings(s)` | `updateDoc(church, { settings, name })` |
+| `replaceAll(state)` | `writeBatch` (450 ops a batch): set everything, delete what's gone |
+| `subscribe(cb)` | `onSnapshot` on the church + 4 collections; calls back once all 5 have arrived |
 
-Writes can fail when offline or when permission is denied. In `FirebaseStore`, catch
-the error, return `false`, and let `afterWrite()` in app.js show the warning.
-Firestore's offline persistence (`persistentLocalCache`) queues writes while
-offline.
+Writes are not awaited. Firestore shows them on screen at once and queues them while
+offline (persistent cache). A refused write goes to `onError`, which shows a toast.
 
-## 3. Security rules (starting point)
+## Security rules
+
+[firestore.rules](../firestore.rules):
+- **Members** read and write the church's four collections, and may update its settings.
+- **The admin** is the only one who can change `members`.
+- **A non-member** may make one change only: adding *their own* uid as `editor`. That is the invite join.
+- **`users/{uid}`** is readable and writable only by that user.
+
+`tests/cloud_e2e.py` checks that an outsider is refused.
+
+## Testing without touching the real project
 
 ```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{db}/documents {
-    function role(churchId) {
-      return get(/databases/$(db)/documents/churches/$(churchId)).data.members[request.auth.uid];
-    }
-    match /churches/{churchId} {
-      allow read: if request.auth != null && role(churchId) != null;
-      allow write: if request.auth != null && role(churchId) == 'admin';
-      match /{col}/{docId} {
-        allow read: if request.auth != null && role(churchId) != null;
-        allow write: if request.auth != null && role(churchId) in ['admin', 'editor'];
-      }
-    }
-  }
-}
+firebase emulators:start --only auth,firestore --project demo-ministry
+py -3 tests\cloud_e2e.py http://localhost:8795/
 ```
 
-## 4. Steps
+The test swaps `js/firebase-config.js` (in the browser only) for an emulator config. It
+then drives two browsers, one of them an iPhone profile, through these steps: sign up,
+put the schedule online, invite, join, live edits both ways, members list, reload,
+sign out, and an outsider being refused.
 
-1. Create a Firebase project and add a Web app. Turn on Firestore and Google sign-in.
-2. Add the GitHub Pages domain (`thekidinside.github.io`) under Auth → Authorized domains. For a better iOS sign-in experience, host on Firebase Hosting instead, so the app's origin matches `authDomain`.
-3. Load the modular SDK from the CDN in `store.js` (no build step needed).
-4. Write `FirebaseStore`, then switch `createStore()` to it when the user is signed in.
-5. One-time migration: on first sign-in, if localStorage has data and the church has none, offer "Upload this browser's schedule" (call `replaceAll`).
-6. Add a sign-in button and church picker to the header.
+## Setup state
 
-## 5. After Firebase
+- `js/firebase-config.js` holds the web config. While it is `null`, sync is off.
+- **Firebase Hosting** (`firebase deploy --only hosting,firestore:rules`) serves the app
+  from the same origin as `authDomain`. That way iOS Safari can complete Google
+  sign-in (see the Patch app's history). GitHub Pages keeps working for everything,
+  but Google sign-in on iPhones is more reliable from the Firebase URL.
+- **Google sign-in** has to be switched on once in the Firebase console:
+  Authentication → Sign-in method → Google → Enable. Email/password is switched on by
+  the setup script.
+
+## Later
 
 - Cloud Function reminders (email, or Messenger/Viber via a bot) a few days before someone serves.
-- Accept/decline per assignment (`assignments` values become `{ personId, status }`).
-- Blockout requests submitted by the ministers themselves.
+- Accept/decline per assignment: `assignments` values become `{ personId, status }`.
+- Ministers submitting their own away dates.
