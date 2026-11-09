@@ -250,25 +250,32 @@ export function canServe(person, roleId) {
   return (person.roleIds || []).includes(roleId);
 }
 
+// Besides admins, the songs belong to anyone set up as a Worship Leader or on Tech. Matched on the
+// role's name, because churches name their own roles. firestore.rules has the same test.
+export function songRole(state, person) {
+  return state.roles.find(r => /^(worship lead|tech)/i.test(r.name) && canServe(person, r.id)) || null;
+}
+
 // How many services a person is on in a month (a person on two roles in one service counts once).
 export function monthLoad(services, personId, y, m) {
   return servicesInMonth(services, y, m).filter(s => peopleOnService(s).has(personId)).length;
 }
 
 // Every problem on one service. type: unavailable | not-qualified | double-booked | unknown-person
+// Several roles on one service is fine; double-booked means the same person twice in one role.
 export function serviceConflicts(state, service) {
   const people = new Map(state.people.map(p => [p.id, p]));
-  const seen = new Map(); // personId -> first roleId
   const out = [];
   for (const role of state.roles) {
+    const seen = new Set();
     for (const pid of assigned(service, role.id)) {
       if (!pid) continue;
       const person = people.get(pid);
       if (!person) { out.push({ type: 'unknown-person', roleId: role.id, personId: pid }); continue; }
       if (isUnavailable(person, service.date)) out.push({ type: 'unavailable', roleId: role.id, personId: pid });
       if (!canServe(person, role.id)) out.push({ type: 'not-qualified', roleId: role.id, personId: pid });
-      if (seen.has(pid)) out.push({ type: 'double-booked', roleId: role.id, personId: pid, otherRoleId: seen.get(pid) });
-      else seen.set(pid, role.id);
+      if (seen.has(pid)) out.push({ type: 'double-booked', roleId: role.id, personId: pid });
+      seen.add(pid);
     }
   }
   return out;
@@ -282,10 +289,7 @@ export function describeConflict(state, c) {
   switch (c.type) {
     case 'unavailable': return `${name} is marked unavailable on this date`;
     case 'not-qualified': return `${name} is not set up to serve as ${roleName}`;
-    case 'double-booked': {
-      const other = state.roles.find(r => r.id === c.otherRoleId);
-      return `${name} is on both ${other ? other.name : 'another role'} and ${roleName}`;
-    }
+    case 'double-booked': return `${name} is on ${roleName} twice`;
     default: return `${roleName} has a person who no longer exists`;
   }
 }
@@ -383,12 +387,12 @@ export function clashNote(state, service, c) {
       return `Away ${formatRange(range)}`;
     }
     case 'not-qualified': return 'Not set up for this role';
-    case 'double-booked': return `Also on ${state.roles.find(r => r.id === c.otherRoleId)?.name || 'another role'}`;
+    case 'double-booked': return 'Listed twice in this role';
     default: return 'No longer on the team';
   }
 }
 
-// The full line in the month's alert: "Joel P. on keys, Sun 8 Nov: also on Bible reading."
+// The full line in the month's alert: "Joel P. on keys, Sun 8 Nov: away 20–23 Nov."
 export function clashSentence(state, service, c) {
   const name = state.people.find(p => p.id === c.personId)?.name || 'Someone';
   const role = (state.roles.find(r => r.id === c.roleId)?.name || c.roleId).toLowerCase();
@@ -416,35 +420,39 @@ export function autoFillMonth(state, y, m, fromISO = '') {
   return { changed, filled };
 }
 
-// Who can take one slot on one service. Anyone already on this service, or away, can be seen
-// but not picked. The least busy come first.
+// Who can take one slot on one service. Anyone away, or already in this role, can be seen but
+// not picked. Someone on another role here can be picked, after those with nothing yet that day.
+// The least busy come first.
 export function assignOptions(state, service, roleId, slot = 0) {
   const { y, m } = parseISO(service.date);
   const others = servicesInMonth(state.services, y, m).filter(s => s.id !== service.id);
   const current = assigned(service, roleId)[slot] || '';
   const weekdayName = formatDate(service.date, { weekday: 'long' });
-  const takenBy = new Map();
+  const roleName = state.roles.find(r => r.id === roleId)?.name || roleId;
+  const inThisRole = new Set(assigned(service, roleId).filter((id, i) => id && i !== slot));
+  const otherRoles = new Map(); // personId -> names of the other roles they hold here
   for (const role of state.roles) {
-    assigned(service, role.id).forEach((id, i) => {
-      if (id && !(role.id === roleId && i === slot) && !takenBy.has(id)) takenBy.set(id, role.name);
-    });
+    if (role.id === roleId) continue;
+    for (const id of new Set(assigned(service, role.id).filter(Boolean))) otherRoles.set(id, [...(otherRoles.get(id) || []), role.name]);
   }
   const available = [];
   const unavailable = [];
   for (const person of state.people.filter(p => canServe(p, roleId))) {
     if (isUnavailable(person, service.date)) {
       unavailable.push({ person, note: clashNote(state, service, { type: 'unavailable', personId: person.id }) });
-    } else if (takenBy.has(person.id)) {
-      unavailable.push({ person, note: `Already on ${takenBy.get(person.id)}` });
+    } else if (inThisRole.has(person.id)) {
+      unavailable.push({ person, note: `Already on ${roleName}` });
     } else {
       const dates = others.filter(s => peopleOnService(s).has(person.id)).map(s => s.date);
       const days = dates.map(d => parseISO(d).d);
       const list = days.length > 1 ? `${days.slice(0, -1).join(', ')} & ${days[days.length - 1]}` : days[0];
-      const note = dates.length ? `Also rostered ${list} ${formatDate(dates[0], { month: 'short' })}` : `Free this ${weekdayName}`;
-      available.push({ person, note, load: dates.length });
+      const also = otherRoles.get(person.id);
+      const note = also ? `Also on ${also.join(', ')} this service`
+        : dates.length ? `Also rostered ${list} ${formatDate(dates[0], { month: 'short' })}` : `Free this ${weekdayName}`;
+      available.push({ person, note, load: dates.length, doubling: Boolean(also) });
     }
   }
-  available.sort((a, b) => (b.person.id === current) - (a.person.id === current) || a.load - b.load || a.person.name.localeCompare(b.person.name));
+  available.sort((a, b) => (b.person.id === current) - (a.person.id === current) || a.doubling - b.doubling || a.load - b.load || a.person.name.localeCompare(b.person.name));
   unavailable.sort((a, b) => a.person.name.localeCompare(b.person.name));
   return { current, available, unavailable };
 }
@@ -567,6 +575,19 @@ const firstName = person => String(person.name).trim().split(/\s+/)[0] || person
 export function findPersonForUser(people, user) {
   if (!user) return null;
   return people.find(p => p.userId && p.userId === user.uid) || findPersonByEmail(people, user.email);
+}
+
+// What signing in changes on your own minister: its link to your account and email, and the
+// name you chose. Separate writes, because the rules allow each one only by itself.
+export function ministerSync(people, person, user, name) {
+  if (person.userId && person.userId !== user.uid) return [];
+  const email = normEmail(user.email);
+  const free = !people.some(p => p.id !== person.id && personEmail(p) === email);
+  const link = person.userId ? !person.email && free : personEmail(person) === email;
+  const out = [];
+  if (email && link) out.push({ userId: user.uid, email });
+  if (name && name !== person.name) out.push({ name });
+  return out;
 }
 
 // A church invite, from a whole link or the bare id. "&as=" names the minister it was sent to.

@@ -111,17 +111,48 @@ test('generateMonthServices adds each Sunday once and tags covering series', () 
   assert.equal(M.generateMonthServices(s, 2026, 11).length, 0);
 });
 
-test('conflicts: unavailable, not qualified, double booked', () => {
+test('conflicts: unavailable, not qualified, twice in one role', () => {
   const s = base();
-  const svc = { ...M.newService({ date: '2026-11-15' }), assignments: { 'worship-team': ['a', 'b'], tech: ['b'], preacher: ['a'] } };
+  const svc = { ...M.newService({ date: '2026-11-15' }), assignments: { 'worship-team': ['a', 'b', 'b'], preacher: ['a'] } };
   const types = M.serviceConflicts(s, svc).map(c => `${c.type}:${c.personId}:${c.roleId}`).sort();
   assert.deepEqual(types, [
-    'double-booked:a:preacher',
-    'double-booked:b:tech',
+    'double-booked:b:worship-team',
     'not-qualified:a:preacher',
     'unavailable:a:preacher',
     'unavailable:a:worship-team',
   ]);
+  const twice = M.serviceConflicts(s, svc).find(c => c.type === 'double-booked');
+  assert.equal(M.describeConflict(s, twice), 'Ben is on Worship Team twice');
+});
+
+test('ministerSync links the account and email and follows the chosen name', () => {
+  const user = { uid: 'u1', email: 'Ana@Example.com' };
+  const sync = (person, others = []) => M.ministerSync([person, ...others], person, user, 'Ana Reyes');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana', email: 'ana@example.com', userId: '' }), [{ userId: 'u1', email: 'ana@example.com' }, { name: 'Ana Reyes' }], 'matched by email');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana', contact: 'ana@example.com', email: '', userId: '' })[0], { userId: 'u1', email: 'ana@example.com' }, 'an older profile with the email in contact');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana Reyes', email: '', userId: 'u1' }), [{ userId: 'u1', email: 'ana@example.com' }], 'linked by account, no email yet');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana Reyes', email: 'ana@example.com', userId: 'u1' }), [], 'nothing to do');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana', email: '', userId: 'u1' }, [{ id: 'b', name: 'Other', email: 'ana@example.com' }]), [{ name: 'Ana Reyes' }], 'never takes an email another minister uses');
+  assert.deepEqual(sync({ id: 'a', name: 'Ana', email: 'ana@example.com', userId: 'u2' }), [], 'someone else\'s minister is left alone');
+});
+
+test('songRole is for people set up as a Worship Leader or on Tech, however the role is named', () => {
+  const s = { roles: [...M.DEFAULT_ROLES, { id: 'role_x', name: 'tech crew', slots: 1 }, { id: 'role_y', name: 'Technology-free zone?', slots: 1 }] };
+  assert.equal(M.songRole(s, { roleIds: ['worship-leader'] }).id, 'worship-leader');
+  assert.equal(M.songRole(s, { roleIds: ['preacher', 'tech'] }).id, 'tech');
+  assert.equal(M.songRole(s, { roleIds: ['role_x'] }).id, 'role_x');
+  assert.equal(M.songRole(s, { roleIds: ['worship-team', 'preacher'] }), null, 'the team and the preacher are not');
+  assert.equal(M.songRole(s, { roleIds: [] }), null);
+});
+
+test('one person can hold several roles on a service without a clash', () => {
+  const s = base();
+  s.people.find(p => p.id === 'b').roleIds.push('tech');
+  const svc = { ...M.newService({ date: '2026-11-15' }), assignments: { 'worship-team': ['b'], tech: ['b'] } };
+  s.services = [svc];
+  assert.deepEqual(M.serviceConflicts(s, svc), []);
+  assert.equal(M.monthLoad(s.services, 'b', 2026, 11), 1, 'still one service');
+  assert.deepEqual(M.personSchedule(s, 'b')[0].roles.map(r => r.id), ['worship-team', 'tech']);
 });
 
 test('autoFill keeps existing picks, skips away people, never double books', () => {
@@ -340,17 +371,17 @@ const redesign = () => {
 test('monthSummary counts slots, open places and one clash per person per role', () => {
   const s = redesign();
   s.services = [
-    { ...M.newService({ date: '2026-11-08' }), assignments: { preacher: ['c'], keys: ['b'], kids: ['b'] } },
+    { ...M.newService({ date: '2026-11-08' }), assignments: { preacher: ['c'], keys: ['b', 'b'], kids: ['b'] } },
     { ...M.newService({ date: '2026-11-22' }), assignments: { bible: ['a'], sound: ['a'] } }, // away and not set up: one clash per role
     M.newService({ date: '2026-12-06' }),
   ];
   const sum = M.monthSummary(s, 2026, 11);
   assert.equal(sum.services, 2);
-  assert.equal(sum.filled, 5);
+  assert.equal(sum.filled, 6);
   assert.equal(sum.total, 12);
-  assert.equal(sum.open, 7);
+  assert.equal(sum.open, 6);
   assert.equal(sum.clashes.length, 3);
-  assert.equal(M.clashSentence(s, sum.clashes[0].service, sum.clashes[0].clash), 'Ben T. on kids church, Sun 8 Nov: also on Keys.');
+  assert.equal(M.clashSentence(s, sum.clashes[0].service, sum.clashes[0].clash), 'Ben T. on keys, Sun 8 Nov: listed twice in this role.');
   assert.equal(M.clashSentence(s, sum.clashes[1].service, sum.clashes[1].clash), 'Ana R. on bible reading, Sun 22 Nov: away 20–23 Nov.');
 });
 
@@ -386,6 +417,21 @@ test('assignOptions splits who can and cannot take a place', () => {
   const filled = M.assignOptions(s, target, 'keys', 0);
   assert.equal(filled.current, 'b');
   assert.deepEqual(filled.available.map(x => [x.person.name, x.note]), [['Ben T.', 'Also rostered 8 Nov'], ['Dee', 'Free this Sunday']]);
+});
+
+test('assignOptions lets someone take a second role, after those with nothing that day', () => {
+  const s = redesign();
+  s.people.find(p => p.id === 'b').roleIds.push('bible');
+  s.people.find(p => p.id === 'c').roleIds.push('bible');
+  s.people.push({ id: 'd', name: 'Dee', roleIds: ['bible', 'keys'], unavailable: [] });
+  const target = { ...M.newService({ date: '2026-11-08' }), assignments: { keys: ['b'], preacher: ['c'] } };
+  s.services = [target];
+  const { available, unavailable } = M.assignOptions(s, target, 'bible', 0);
+  assert.deepEqual(available.map(x => [x.person.name, x.note]), [
+    ['Ana R.', 'Free this Sunday'], ['Dee', 'Free this Sunday'],
+    ['Ben T.', 'Also on Keys this service'], ['Cy L.', 'Also on Preacher this service'],
+  ]);
+  assert.deepEqual(unavailable, []);
 });
 
 test('ministerMonth lights a dot per service and calls three of four busy', () => {

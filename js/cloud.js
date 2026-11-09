@@ -3,7 +3,7 @@
 // and signed out, exactly as before, from localStorage.
 //
 // Firestore layout (rules in firestore.rules):
-//   users/{uid}                          { churchId, seen[] }
+//   users/{uid}                          { churchId, seen[], name }
 //   churches/{churchId}                  { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name}, memberPhotos: {uid: jpeg} }
 //   churches/{churchId}/{roles|people|series|services|tasks}/{docId}
 
@@ -183,15 +183,37 @@ export async function churchInfo(churchId) {
   return { id: churchId, name: d.name, members: d.members || {}, memberNames: d.memberNames || {}, memberPhotos };
 }
 
+// The name you chose at sign-in, or '' if you've never been asked.
+export async function profileName(uid) {
+  const { db, F } = await cloud();
+  const snap = await F.getDoc(F.doc(db, 'users', uid));
+  const name = snap.exists() ? snap.data().name : '';
+  return typeof name === 'string' ? name : '';
+}
+
+// On your account, so the name is there on any device and when you join a church.
+async function rememberName(name) {
+  const { auth, db, A, F } = await cloud();
+  await F.setDoc(F.doc(db, 'users', auth.currentUser.uid), { name }, { merge: true });
+  await A.updateProfile(auth.currentUser, { displayName: name }).catch(() => {}); // only used when joining another church
+}
+
+// Your name, with no church yet ('') or as this church lists you.
+export async function saveName(churchId, name) {
+  const { auth, db, F } = await cloud();
+  if (churchId) await F.updateDoc(F.doc(db, 'churches', churchId), { [`memberNames.${auth.currentUser.uid}`]: name });
+  await rememberName(name);
+}
+
 // Your own name and photo, as this church lists you. Rejects if the rules refuse it.
 export async function saveProfile(churchId, name, photo) {
-  const { auth, db, A, F } = await cloud();
+  const { auth, db, F } = await cloud();
   const { uid } = auth.currentUser;
   await F.updateDoc(F.doc(db, 'churches', churchId), {
     [`memberNames.${uid}`]: name,
     [`memberPhotos.${uid}`]: photo || F.deleteField(),
   });
-  await A.updateProfile(auth.currentUser, { displayName: name }).catch(() => {}); // only used when joining another church
+  await rememberName(name);
 }
 
 // Admin only (enforced by the rules). A removed person is also listed in `removed`,

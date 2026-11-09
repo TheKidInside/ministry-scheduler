@@ -17,7 +17,9 @@ sees changes live. The views don't know which store they're using.
    **member** (stored as `editor`). Members can see everything. Only **admins** can change
    the schedule, ministers, series, tasks, roles and settings, or remove members. An admin
    can make someone else an admin from the account sheet. A member assigned to preach a
-   service can edit that service's sermon: title, scripture and series.
+   service can edit that service's sermon: title, scripture and series. Anyone set up as
+   a Worship Leader or on Tech can edit any service's songs. The first sign-in asks for your name, and from then on your
+   minister's name follows it.
 4. **Signing out** returns that browser to its own local copy. The church stays online.
 
 Anyone holding the invite link can join, so it should only go to the ministry team.
@@ -25,7 +27,7 @@ Anyone holding the invite link can join, so it should only go to the ministry te
 ## Firestore layout
 
 ```
-users/{uid}                              { churchId, seen[] }               your church (one per account); the assignments you've opened
+users/{uid}                              { churchId, seen[], name }         your church (one per account); the assignments you've opened; the name you chose
 churches/{churchId}                      { name, settings, members: {uid: 'admin'|'editor'}, memberNames: {uid: name} }
 churches/{churchId}/roles/{roleId}       { name, slots, order }
 churches/{churchId}/people/{personId}    { name, contact, email, roleIds[], unavailable[] }
@@ -59,8 +61,9 @@ Only a refused read means you were removed.
 [firestore.rules](../firestore.rules):
 - **Members** read the church's five collections.
 - **Admins** are the only ones who write them, or change the settings or `members`.
+- **A Worship Leader or Tech** may change only `setlist` (up to 30 songs) on any service. The save names their minister and role in `setlistBy` and `setlistRole`. The rules confirm that minister is them, holds that role, and that the role's name starts with "Worship Lead" or "Tech".
 - **A preacher** may change only `sermon` on a service where `assignments.preacher` (its first three places) is them.
-- **Your own minister**: you may change its `name` and `photo`. An invite can link you to a minister nobody has claimed, unless someone else's email is on it.
+- **Your own minister**: you may change its `name` and `photo`. An invite or your sign-in email can link you to a minister nobody has claimed, unless someone else's email is on it, and you can add your own email to a minister already linked to you.
 - **A non-member** may make one change only: adding *their own* uid as `editor`. That is the invite join.
 - **`users/{uid}`** is readable and writable only by that user.
 

@@ -268,6 +268,7 @@ function renderSchedule() {
 
   const today = M.todayISO();
   const thisWeekId = list.find(s => s.date >= today && s.date <= M.addDays(today, 6))?.id;
+  const songsOnly = !admin && canEditSongs();
   const head = state.roles.map(r => `<th scope="col">${esc(r.name)}</th>`).join('');
   const rows = list.map(svc => {
     const clashes = M.serviceClashes(state, svc);
@@ -288,12 +289,13 @@ function renderSchedule() {
       <th scope="row" class="when"><div class="when-inner">
         <span class="when-date">${esc(M.shortDate(svc.date))}${svc.id === thisWeekId ? '<span class="week-pill">This week</span>' : ''}</span>
         ${series || passage ? `<span class="when-meta"><span class="series-tag" style="--series:${esc(series?.color || 'var(--line-strong)')}">${esc([series?.name, passage].filter(Boolean).join(' · '))}</span></span>` : ''}
-        ${!usual || svc.setlist?.length ? `<span class="when-meta">${usual ? '' : `<span>${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>`}
-          ${svc.setlist?.length ? `<span class="songs-tag" title="${esc(svc.setlist.map(M.songLabel).join('\n'))}">${plural(svc.setlist.length, 'song')}</span>` : ''}</span>` : ''}
+        ${!usual || svc.setlist?.length || songsOnly ? `<span class="when-meta">${usual ? '' : `<span>${esc([svc.time, svc.name].filter(Boolean).join(' · '))}</span>`}
+          ${svc.setlist?.length ? `<span class="songs-tag" title="${esc(svc.setlist.map(M.songLabel).join('\n'))}">${plural(svc.setlist.length, 'song')}</span>` : ''}
+          ${songsOnly ? `<button class="link-btn" data-action="edit-setlist" data-id="${esc(svc.id)}">${svc.setlist?.length ? 'Edit songs' : 'Add songs'}</button>` : ''}</span>` : ''}
       </div></th>${cells}</tr>`;
   }).join('');
   return `${stats}${alert}${toolbar}<div class="table-wrap"><table class="matrix"><thead><tr><th scope="col">Service</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="legend"><span><i class="l-open"></i>Open slot</span><span><i class="l-clash"></i>Clash: rostered twice, away, or not set up for the role</span></div>`;
+    <div class="legend"><span><i class="l-open"></i>Open slot</span><span><i class="l-clash"></i>Clash: listed twice in a role, away, or not set up for the role</span></div>`;
 }
 
 // One service on a phone, grouped the way the team thinks of it.
@@ -322,9 +324,9 @@ function renderDay(svc, modes, addButtons) {
         }).join('');
       }).join('')}</div>
     </section>`).join('');
-  const songs = svc.setlist?.length
-    ? svc.setlist.map((song, i) => `<div class="song"><span class="song-n">${i + 1}</span><span class="song-title">${esc(song.title)}</span>${song.key ? `<span class="song-key">${esc(song.key)}</span>` : ''}</div>`).join('')
-    : `<div class="no-songs"><span>No songs added yet</span>${admin ? `<button class="btn small" data-action="edit-service" data-id="${esc(svc.id)}">Add songs</button>` : ''}</div>`;
+  const songList = (svc.setlist || []).map((song, i) => `<div class="song"><span class="song-n">${i + 1}</span><span class="song-title">${esc(song.title)}</span>${song.key ? `<span class="song-key">${esc(song.key)}</span>` : ''}</div>`).join('');
+  const songButton = canEditSongs() ? `<button class="btn small" data-action="edit-setlist" data-id="${esc(svc.id)}">${songList ? 'Edit songs' : 'Add songs'}</button>` : '';
+  const songs = `${songList}${songList && !songButton ? '' : `<div class="no-songs"><span>${songList ? '' : 'No songs added yet'}</span>${songButton}</div>`}`;
   const when = M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '');
   return `<div class="toolbar">${modes}</div>
     <div class="day-view">
@@ -689,6 +691,51 @@ function addSong(list) {
   $('.song-row:last-child [name="song-title"]', list).focus();
 }
 
+const setlistSection = svc => `<section class="sheet-section" aria-label="Setlist">
+      <header class="sheet-section-head"><h3>Setlist</h3><button type="button" class="link-btn" data-song="add">Add a song</button></header>
+      <ol class="setlist">${(svc.setlist || []).map(songRow).join('')}</ol>
+      <datalist id="song-library">${M.songLibrary(state.services).map(s => `<option value="${esc(s.title)}">${s.key ? `Key of ${esc(s.key)}` : ''}</option>`).join('')}</datalist>
+    </section>`;
+
+const readSetlist = form => $$('.song-row', form)
+  .map(row => ({ title: $('[name="song-title"]', row).value.trim(), key: $('[name="song-key"]', row).value }))
+  .filter(song => song.title);
+
+// How the song rows behave, in the service sheet and the songs sheet alike. Delegated, because
+// the service sheet redraws its rows.
+function wireSetlist(form) {
+  // A song sung before brings back the key it was last sung in.
+  form.addEventListener('change', e => {
+    if (e.target.name !== 'song-title') return;
+    const key = $('[name="song-key"]', e.target.closest('.song-row'));
+    const known = M.songLibrary(state.services).find(s => s.title.toLowerCase() === e.target.value.trim().toLowerCase());
+    if (known?.key && !key.value) key.value = known.key;
+  });
+  // Enter in a song title moves to the next song (adding one at the end) instead of saving.
+  form.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.target.name !== 'song-title' || e.isComposing) return;
+    e.preventDefault();
+    const next = e.target.closest('.song-row').nextElementSibling;
+    if (next) $('[name="song-title"]', next).focus();
+    else if (e.target.value.trim()) addSong($('.setlist', form));
+  });
+  form.addEventListener('click', e => {
+    const btn = e.target.closest('[data-song]');
+    if (!btn) return;
+    const list = $('.setlist', form);
+    const row = btn.closest('.song-row');
+    if (btn.dataset.song === 'add') {
+      addSong(list);
+    } else if (btn.dataset.song === 'up' && row.previousElementSibling) {
+      row.previousElementSibling.before(row);
+      // At the top the up button hides, so keep focus on the row's title instead.
+      $(row.previousElementSibling ? '[data-song="up"]' : '[name="song-title"]', row).focus();
+    } else if (btn.dataset.song === 'remove') {
+      row.remove();
+    }
+  });
+}
+
 function serviceFormBody(svc) {
   const roles = state.roles.map(role => {
     const ids = M.assigned(svc, role.id);
@@ -717,11 +764,7 @@ function serviceFormBody(svc) {
       <div class="roles">${roles}</div>
       <div class="conflicts" aria-live="polite"></div>
     </section>
-    <section class="sheet-section" aria-label="Setlist">
-      <header class="sheet-section-head"><h3>Setlist</h3><button type="button" class="link-btn" data-song="add">Add a song</button></header>
-      <ol class="setlist">${(svc.setlist || []).map(songRow).join('')}</ol>
-      <datalist id="song-library">${M.songLibrary(state.services).map(s => `<option value="${esc(s.title)}">${s.key ? `Key of ${esc(s.key)}` : ''}</option>`).join('')}</datalist>
-    </section>
+    ${setlistSection(svc)}
     <section class="sheet-section"><label>Notes <textarea name="notes" rows="2" maxlength="500">${esc(svc.notes)}</textarea></label></section>`;
 }
 
@@ -742,9 +785,7 @@ function readServiceForm(form, base) {
       scripture: form.elements['sermon-scripture'].value.trim(),
       seriesId: form.elements['sermon-series'].value,
     },
-    setlist: $$('.song-row', form)
-      .map(row => ({ title: $('[name="song-title"]', row).value.trim(), key: $('[name="song-key"]', row).value }))
-      .filter(song => song.title),
+    setlist: readSetlist(form),
     notes: form.elements.notes.value.trim(),
   };
 }
@@ -775,43 +816,17 @@ function openServiceEditor(existing, date) {
     onMount(form) {
       const refresh = () => showConflicts(form, readServiceForm(form, svc));
       refresh();
+      wireSetlist(form);
       form.addEventListener('change', e => {
-        // A song sung before brings back the key it was last sung in.
-        if (e.target.name === 'song-title') {
-          const key = $('[name="song-key"]', e.target.closest('.song-row'));
-          const known = M.songLibrary(state.services).find(s => s.title.toLowerCase() === e.target.value.trim().toLowerCase());
-          if (known?.key && !key.value) key.value = known.key;
-          return;
-        }
+        if (e.target.name === 'song-title') return;
         if (e.target.name === 'date' && e.target.value && !form.elements['sermon-series'].value) {
           const cover = M.seriesCoveringDate(state.series, e.target.value);
           if (cover) form.elements['sermon-series'].value = cover.id;
         }
         refresh();
       });
-      // Enter in a song title moves to the next song (adding one at the end) instead of saving.
-      form.addEventListener('keydown', e => {
-        if (e.key !== 'Enter' || e.target.name !== 'song-title' || e.isComposing) return;
-        e.preventDefault();
-        const next = e.target.closest('.song-row').nextElementSibling;
-        if (next) $('[name="song-title"]', next).focus();
-        else if (e.target.value.trim()) addSong($('.setlist', form));
-      });
       form.addEventListener('click', e => {
-        if (e.target.closest('[data-local="autofill"]')) return autofill();
-        const btn = e.target.closest('[data-song]');
-        if (!btn) return;
-        const list = $('.setlist', form);
-        const row = btn.closest('.song-row');
-        if (btn.dataset.song === 'add') {
-          addSong(list);
-        } else if (btn.dataset.song === 'up' && row.previousElementSibling) {
-          row.previousElementSibling.before(row);
-          // At the top the up button hides, so keep focus on the row's title instead.
-          $(row.previousElementSibling ? '[data-song="up"]' : '[name="song-title"]', row).focus();
-        } else if (btn.dataset.song === 'remove') {
-          row.remove();
-        }
+        if (e.target.closest('[data-local="autofill"]')) autofill();
       });
       // Delegated above: this button is redrawn along with the rest of the sheet.
       const autofill = () => {
@@ -865,6 +880,27 @@ function openSermonEditor(svc) {
         seriesId: form.elements['sermon-series'].value,
       } });
       toast('Sermon saved.');
+      return false;
+    },
+  });
+}
+
+// ----- the songs: Worship Leaders, Tech and admins -----
+
+function openSetlistEditor(svc) {
+  openDialog(dialogHead('Songs', M.formatDate(svc.date, { weekday: 'long', day: 'numeric', month: 'long' }).replace(',', '')) + `<div class="dialog-body service-form">${setlistSection(svc)}</div>
+    <footer class="dialog-actions">
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save</button>
+    </footer>`, {
+    onMount: wireSetlist,
+    async onSubmit(form) {
+      // A non-admin's save names their minister and role, which is what the rules check.
+      const person = me();
+      const role = !canManage() && person ? M.songRole(state, person) : null;
+      await patchDoc('services', svc.id, { setlist: readSetlist(form), ...(role ? { setlistBy: person.id, setlistRole: role.id } : {}) });
+      toast('Songs saved.');
       return false;
     },
   });
@@ -1382,6 +1418,7 @@ const isCloud = () => Boolean(cloudState.churchId);
 // Signed out, it's your own browser's copy, so everything is yours to change.
 const canManage = () => !isCloud() || (cloudState.info?.members || store.members)?.[cloudState.user?.uid] === 'admin';
 // The first three preacher places, the same limit as firestore.rules.
+const canEditSongs = () => canManage() || Boolean(me() && M.songRole(state, me()));
 const preachesOn = svc => Boolean(me()) && M.assigned(svc, M.PREACHER_ROLE).slice(0, 3).includes(me().id);
 let loadSeq = 0;          // each store switch gets a number; a slower, older load is thrown away
 let opening = '';         // church id being opened right now (auth can fire twice)
@@ -1498,12 +1535,68 @@ async function initCloud() {
       if (current) await useChurch(current);
       renderAccountButton();
       // Just signed in from the dialog and not in a church yet: show the next step.
-      if (cloudState.reopen) { cloudState.reopen = false; if (!isCloud() && !dialog().open) openAccount(); }
+      const reopen = cloudState.reopen;
+      cloudState.reopen = false;
+      await settleProfile(user, () => { if (reopen && !isCloud() && !dialog().open) openAccount(); });
     });
   } catch (err) {
     cloudState.error = err.message || String(err);
   }
   renderAccountButton();
+}
+
+let askedName = '';
+
+// Every sign-in: ask once for the name you go by, then keep your minister matching it.
+async function settleProfile(user, then = () => {}) {
+  const C = await import('./cloud.js');
+  const name = await C.profileName(user.uid).catch(() => null); // null: offline, so don't ask yet
+  if (cloudState.user !== user) return;
+  if (name === '' && askedName !== user.uid) { // once per visit, however many times sign-in settles
+    askedName = user.uid;
+    whenClosed(() => openNamePrompt(user, then));
+    return;
+  }
+  if (name) await syncMinister(name);
+  then();
+}
+
+async function syncMinister(name) {
+  if (!isCloud()) return;
+  const { user } = cloudState;
+  const person = me();
+  if (person) for (const fields of M.ministerSync(state.people, person, user, name)) await patchDoc('people', person.id, fields);
+  const names = cloudState.info?.memberNames;
+  if (names && names[user.uid] !== name) {
+    names[user.uid] = name;
+    import('./cloud.js').then(C => C.saveName(cloudState.churchId, name)).catch(() => {});
+  }
+}
+
+function openNamePrompt(user, then) {
+  if (cloudState.user !== user) return;
+  const minister = me();
+  openDialog(`<header class="dialog-head"><div><h2>What's your name?</h2><p class="muted">This is how your church sees you on the roster.</p></div></header>
+    <div class="dialog-body">
+      <label>Your name <input name="your-name" value="${esc(minister?.name || user.displayName || '')}" required maxlength="60" autocomplete="name"></label>
+      <p class="form-error" aria-live="polite"></p>
+    </div>
+    <footer class="dialog-actions"><span class="spacer"></span><button class="btn primary" value="save">Save</button></footer>`, {
+    className: 'name-prompt',
+    async onSubmit(form) {
+      if (cloudState.user !== user) return false; // signed out in another tab
+      const name = form.elements['your-name'].value.trim();
+      if (!name) { $('.form-error', form).textContent = 'Enter your name.'; return true; }
+      whenClosed(then);
+      const C = await import('./cloud.js');
+      if (cloudState.info) cloudState.info.memberNames[user.uid] = name;
+      // Not waited for: with no signal the write is queued and sent on reconnecting.
+      C.saveName(isCloud() ? cloudState.churchId : '', name).catch(err => toast(`Your name was not saved online: ${err.message || err}`, 'warn'));
+      await syncMinister(name);
+      toast('Name saved.');
+      return false;
+    },
+  });
 }
 
 // An invite sent to one minister links that minister to whoever accepts it, unless they already
@@ -1523,7 +1616,7 @@ async function claimInvitedPerson(personId) {
 // Returns true when you end up in the invited church.
 async function acceptInvite(invite, currentId = cloudState.churchId) {
   const { churchId, personId } = M.parseInvite(invite);
-  if (currentId === churchId) { await useChurch(churchId); await claimInvitedPerson(personId); return true; }
+  if (currentId === churchId) { await useChurch(churchId); await claimInvitedPerson(personId); await settleProfile(cloudState.user); return true; }
   if (currentId && !confirm('You are already in a church in this app. Leave it and join the one in this invite?')) return false;
   const C = await import('./cloud.js');
   try {
@@ -1531,6 +1624,7 @@ async function acceptInvite(invite, currentId = cloudState.churchId) {
     cloudState.churchId = '';
     await useChurch(churchId);
     await claimInvitedPerson(personId);
+    await settleProfile(cloudState.user);
     toast(`You joined ${state.settings.churchName}.`);
     return true;
   } catch (err) {
@@ -1661,7 +1755,7 @@ function openAccount() {
       </fieldset>
       <p class="lead">Every change is shared live with everyone in this church, and kept on this device for when you are offline.</p>
       <label>Invite link <span class="copy-row"><input id="invite-link" readonly value="${esc(inviteLink(cloudState.churchId))}"><button type="button" class="btn" data-local="copy-invite">Copy</button></span></label>
-      <p class="muted small">Anyone with this link can join and see the schedule. Only admins can change it. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
+      <p class="muted small">Anyone with this link can join and see the schedule. Only admins can change it, apart from songs, which Worship Leaders and Tech can edit too. Send it only to your ministry team. Someone you remove can't rejoin with it.</p>
       <fieldset><legend>Members</legend><ul class="members">${membersHtml(cloudState.info)}</ul></fieldset>
       <p class="form-error" aria-live="polite"></p>`;
     actions = `<button type="submit" class="btn ghost" value="signout">Sign out</button>
@@ -1764,6 +1858,7 @@ function openAccount() {
               : { ...M.emptyState(), settings: { ...state.settings, churchName: isUntouchedSample() ? 'Our Church' : state.settings.churchName }, roles: state.roles };
             const cid = await C.createChurch(cloudState.user, data);
             await useChurch(cid);
+            await settleProfile(cloudState.user);
             toast('Your church is online. Copy the invite link to add your team.');
             dialog().close();
             openAccount();
@@ -2020,6 +2115,10 @@ async function handleAction(el) {
     case 'edit-sermon': {
       const svc = state.services.find(s => s.id === id);
       return svc && preachesOn(svc) ? openSermonEditor(svc) : undefined;
+    }
+    case 'edit-setlist': {
+      const svc = state.services.find(s => s.id === id);
+      return svc && canEditSongs() ? openSetlistEditor(svc) : undefined;
     }
     case 'edit-service': return openServiceEditor(state.services.find(s => s.id === id));
     case 'new-service': {

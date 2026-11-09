@@ -330,25 +330,53 @@ with sync_playwright() as p:
     check(int(page.locator(".stat-value").nth(2).inner_text()) == open_before - 1, "assigning takes one off the open count")
     check(page.locator('.matrix td[data-label="Worship Leader"]', has_text=name).count() >= 1, "the name lands in the table")
 
-    # clashes show in the alert and on the name; the alert line opens that service
+    # one person can take a second role on a service through the assign sheet, with no clash
     first = page.locator(".matrix tbody tr").first
     first.locator(".when").click()
     page.wait_for_selector("dialog[open]")
-    worship = page.eval_on_selector('select[name="role:worship-team"]', "s => s.value")
-    page.select_option('select[name="role:opening-prayer"]', value=worship)
+    team = page.locator('select[name="role:worship-team"]')
+    for i in range(team.count()):
+        team.nth(i).select_option(value="")
+    page.select_option('select[name="role:opening-prayer"]', value="p1")  # Ana R. can do both
     page.click('dialog .dialog-actions button[value="save"]')
     page.wait_for_selector("dialog[open] .notify-list")
     page.click('dialog .dialog-actions button[value="cancel"]')
+    first.locator('td[data-label="Worship Team"] .assign').click()
+    page.wait_for_selector("dialog.assign-sheet[open]")
+    ana = page.locator("dialog .pick:has(input)", has_text="Ana R.")
+    check("Also on Opening Prayer" in ana.inner_text(), "someone on another role can be picked and says so")
+    ana.locator("input").check()
+    page.click("dialog .assign-go")
+    page.wait_for_selector("dialog[open] .notify-list")
+    page.click('dialog .dialog-actions button[value="cancel"]')
+    check(first.locator('td[data-label="Opening Prayer"]', has_text="Ana R.").count() == 1
+          and first.locator('td[data-label="Worship Team"]', has_text="Ana R.").count() == 1, "the name lands in both roles")
+    check(first.locator(".chip.conflict").count() == 0, "two roles on one service is not a clash")
+
+    # the same person twice in one role is a clash: it shows in the alert and on the name; the alert line opens that service
+    first.locator(".when").click()
+    page.wait_for_selector("dialog[open]")
+    page.locator('select[name="role:worship-team"]').nth(1).select_option(value="p1")
+    check("Ana R. is on Worship Team twice" in page.inner_text(".conflicts"), "listing someone twice in a role warns live")
+    page.click('dialog .dialog-actions button[value="save"]')
+    page.wait_for_selector(".alert")
     check(page.locator(".alert").count() == 1 and page.locator(".matrix .chip.conflict").count() >= 1, "a clash shows in the alert and on the name")
     page.locator(".alert-line").first.click()
     page.wait_for_selector("dialog[open] .service-form")
     page.click('dialog button[value="cancel"]')
 
     # auto-fill the rest of the month in one go
+    page.click('[data-action="next"]')  # next month, because auto-fill skips services already past
+    page.locator(".matrix tbody .when").last.click()
+    page.wait_for_selector("dialog[open]")
+    page.select_option('select[name="role:opening-prayer"]', value="")
+    page.click('dialog .dialog-actions button[value="save"]')
+    open_now = int(page.locator(".stat-value").nth(2).inner_text())
     page.click('[data-action="autofill-month"]')
     page.wait_for_timeout(200)
     filled = page.locator(".stat-value").nth(2).inner_text()
-    check(int(filled) < open_before, f"auto-fill fills what it can across the month ({filled} left)")
+    check(int(filled) < open_now, f"auto-fill fills what it can across the month ({filled} left of {open_now})")
+    page.click('[data-action="prev"]')
 
     # ministers: search and role filter hide rows without redrawing the box
     page.click('[data-tab="ministers"]')

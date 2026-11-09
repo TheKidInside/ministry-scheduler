@@ -17,6 +17,14 @@ service cloud.firestore {
     function preacherIsMe(churchId, ids, i) {
       return ids.size() > i && isMe(get(/databases/$(database)/documents/churches/$(churchId)/people/$(ids[i])).data);
     }
+    // The save names a minister and role; both are checked here. The same test as songRole in model.js.
+    function canEditSongs(churchId, personId, roleId) {
+      let person = get(/databases/$(database)/documents/churches/$(churchId)/people/$(personId)).data;
+      let role = get(/databases/$(database)/documents/churches/$(churchId)/roles/$(roleId)).data;
+      return isMe(person)
+        && roleId in person.get('roleIds', [])
+        && role.name.lower().matches('(worship lead|tech).*');
+    }
     function validSermon(s) {
       return s.keys().hasOnly(['title', 'scripture', 'seriesId'])
         && s.title is string && s.title.size() <= 120
@@ -68,12 +76,18 @@ service cloud.firestore {
       match /{collection}/{docId} {
         allow read: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isMember(churchId);
         // Only an admin changes the schedule, ministers, series, roles or tasks. The two blocks
-        // below are the only exceptions.
+        // below are the only exceptions: songs, a preacher's sermon, and your own minister.
         allow write: if collection in ['roles', 'people', 'series', 'services', 'tasks'] && isAdmin(churchId);
       }
 
-      // A preacher may edit the sermon on a service they are assigned to preach, and nothing else on it.
       match /services/{serviceId} {
+        // Worship Leaders and Tech may change the songs on a service, and nothing else on it.
+        allow update: if isMember(churchId)
+          && changed().hasOnly(['setlist', 'setlistBy', 'setlistRole'])
+          && request.resource.data.setlist is list
+          && request.resource.data.setlist.size() <= 30
+          && canEditSongs(churchId, request.resource.data.setlistBy, request.resource.data.setlistRole);
+        // A preacher may edit the sermon on a service they are assigned to preach, and nothing else on it.
         allow update: if isMember(churchId)
           && changed().hasOnly(['sermon'])
           && validSermon(request.resource.data.sermon)
@@ -92,10 +106,10 @@ service cloud.firestore {
           && request.resource.data.name.size() <= 60
           && request.resource.data.get('photo', '') is string
           && request.resource.data.get('photo', '').size() <= 40000;
-        // Accepting a personal invite: link yourself to a minister nobody has claimed, unless
-        // they already have someone else's email on file.
+        // Link yourself to a minister nobody else has claimed (a personal invite, or your email
+        // on file), or add your email to your own minister, unless it has someone else's email.
         allow update: if isMember(churchId)
-          && resource.data.get('userId', '') == ''
+          && resource.data.get('userId', '') in ['', request.auth.uid]
           && resource.data.get('email', '') in ['', myEmail()]
           && changed().hasOnly(['userId', 'email'])
           && request.resource.data.userId == request.auth.uid

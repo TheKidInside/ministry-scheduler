@@ -31,6 +31,8 @@ SETTINGS = """async cid => { const C = await import('/js/cloud.js'); const { db,
   try { await F.updateDoc(F.doc(db, 'churches', cid), { 'settings.churchName': 'Hacked' }); return 'allowed'; } catch (e) { return e.code; } }"""
 FIRST_DOC = """async ([cid, col]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
   const s = await F.getDocs(F.collection(db, 'churches', cid, col)); return s.docs[0].id; }"""
+PERSON = """async ([cid, name]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
+  const s = await F.getDocs(F.collection(db, 'churches', cid, 'people')); const hit = s.docs.find(x => x.data().name === name); return { id: hit.id, ...hit.data() }; }"""
 sys.stdout.reconfigure(encoding="utf-8")
 
 
@@ -65,6 +67,13 @@ def sign_up(page, email):
     page.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'local'", timeout=15000)
 
 
+def set_name(page, name=None):
+    page.wait_for_selector("dialog.name-prompt[open]", timeout=15000)
+    if name:
+        page.fill("dialog input[name=your-name]", name)
+    page.click('dialog .dialog-actions button[value="save"]')
+
+
 wipe()
 with sync_playwright() as p:
     browser = p.chromium.launch()
@@ -76,6 +85,9 @@ with sync_playwright() as p:
     a.wait_for_function("document.querySelector('#account-btn').textContent.includes('Sign in')", timeout=15000)  # cloud loads lazily
     check(True, "signed out, the app says it is saved in this browser")
     sign_up(a, "pastor@example.com")
+    a.wait_for_selector("dialog.name-prompt[open]", timeout=15000)
+    check(a.input_value("dialog input[name=your-name]") == "", "signing in asks for your name, without guessing from the email")
+    set_name(a, "Pastor")
     try:  # the app reopens the account dialog by itself after signing in; open it only if it didn't
         a.wait_for_selector('dialog[open] button[value="upload"]', timeout=4000)
     except Exception:
@@ -99,6 +111,7 @@ with sync_playwright() as p:
     b.fill("dialog input[name=password]", "secret123")
     b.click('dialog button[value="create"]')
     b.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    set_name(b, "Synced Person")
     b.wait_for_selector(".day-pill")
     check(b.locator(".day-pill").count() == rows_a, "the leader sees the same services as the pastor")
 
@@ -112,6 +125,8 @@ with sync_playwright() as p:
         check(b.locator(gone).count() == 0, f"{tab}: a member can't edit")
     b.click('[data-tab="schedule"]')
 
+    check(b.locator('[data-action="edit-setlist"]').count() == 0, "a member with no Worship Leader or Tech role can't edit songs")
+
     # 3b. An admin's change shows up live on the phone
     a.locator(".matrix tbody .when").first.click()
     a.fill('dialog input[name="sermon-title"]', "Live From The Pastor")
@@ -124,6 +139,7 @@ with sync_playwright() as p:
     a.click('[data-tab="ministers"]')
     a.click('[data-action="new-person"]')
     a.fill('dialog input[name="name"]', "Synced Person")
+    a.check('dialog input[name="roles"][value="tech"]')
     check(a.locator("dialog [data-link-mode]").count() == 3 and a.locator('dialog input[name="email"]').count() == 0,
           "a minister with no email offers invite, registered user, or blank")
     a.click('dialog [data-link-mode="invite"]')
@@ -161,6 +177,19 @@ with sync_playwright() as p:
     b.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
     b.wait_for_timeout(1500)
     check(b.is_visible("#mine-btn") and not b.is_visible("#mine-btn .bell-count"), "seen assignments stay seen after a reload")
+
+    # 4b1. Someone on Tech can change the songs, and only the songs
+    b.click('[data-tab="schedule"]')
+    b.locator('[data-action="edit-setlist"]').click()
+    b.wait_for_selector("dialog[open] .setlist")
+    check(b.locator('dialog select[name^="role:"], dialog input[name="date"]').count() == 0, "the songs sheet has only the songs")
+    b.click('dialog [data-song="add"]')
+    b.locator('dialog [name="song-title"]').last.fill("Member Song")
+    b.click('dialog .dialog-actions button[value="save"]')
+    a.click('[data-action="prev"]')
+    a.wait_for_selector('.songs-tag[title*="Member Song"]', state="attached", timeout=15000)
+    check(True, "a Tech member's song edit appears live for the admin")
+    a.click('[data-action="next"]')
 
     # 4b2. The same for a weekly task: the bell lights up live, and ticking it syncs back
     a.click('[data-tab="tasks"]')  # still on next month, so the week is upcoming
@@ -215,6 +244,13 @@ with sync_playwright() as p:
     someone_elses = a.evaluate("""async ([cid, mine]) => { const C = await import('/js/cloud.js'); const { db, F } = await C.cloud();
       const s = await F.getDocs(F.collection(db, 'churches', cid, 'services')); return s.docs.map(d => d.id).find(id => id !== mine); }""", [cid_now, mine])
     check(b.evaluate(TRY, [cid_now, "services", someone_elses, {"sermon": sermon}]) == "permission-denied", "the rules refuse a preacher editing someone else's sermon")
+    songs = [{"title": "Rule Song", "key": ""}]
+    synced = a.evaluate(PERSON, [cid_now, "Synced Person"])["id"]
+    by_tech = {"setlist": songs, "setlistBy": synced, "setlistRole": "tech"}
+    check(b.evaluate(TRY, [cid_now, "services", someone_elses, by_tech]) == "allowed", "the rules let someone on Tech change the songs")
+    check(b.evaluate(TRY, [cid_now, "services", someone_elses, {**by_tech, "notes": "x"}]) == "permission-denied", "the rules refuse slipping in another field with the songs")
+    check(b.evaluate(TRY, [cid_now, "services", someone_elses, {**by_tech, "setlistRole": "worship-leader"}]) == "permission-denied", "the rules refuse claiming a role you don't hold")
+    check(b.evaluate(TRY, [cid_now, "services", someone_elses, {**by_tech, "setlistRole": "preacher"}]) == "permission-denied", "the rules refuse a role that doesn't edit songs")
     for col in ("people", "series", "tasks", "roles"):
         doc = b.evaluate(FIRST_DOC, [cid_now, col])
         check(b.evaluate(TRY, [cid_now, col, doc, {"name": "Forged"}]) == "permission-denied", f"the rules refuse a member changing {col}")
@@ -243,8 +279,50 @@ with sync_playwright() as p:
     c.fill("dialog input[name=password]", "secret123")
     c.click('dialog button[value="create"]')
     c.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    c.wait_for_selector("dialog.name-prompt[open]", timeout=15000)
+    check(c.input_value("dialog input[name=your-name]") == "Invited Person", "the name prompt starts from your minister's name")
+    set_name(c)
     a.wait_for_function("[...document.querySelectorAll('.person')].find(p => p.textContent.includes('Invited Person')).querySelector('.person-link.on')", timeout=15000)
     check(True, "accepting a personal invite links the account to that minister")
+    c_id = a.evaluate(PERSON, [cid_now, "Invited Person"])["id"]
+    service_id = a.evaluate(FIRST_DOC, [cid_now, "services"])
+    check(c.evaluate(TRY, [cid_now, "services", service_id, {"setlist": songs, "setlistBy": c_id, "setlistRole": "tech"}]) == "permission-denied", "the rules refuse songs from a member not on Tech")
+    check(c.evaluate(TRY, [cid_now, "services", service_id, {"setlist": songs, "setlistBy": synced, "setlistRole": "tech"}]) == "permission-denied", "the rules refuse borrowing a Tech member's name")
+    check(c.evaluate(TRY, [cid_now, "services", someone_elses, {"setlist": songs}]) == "permission-denied", "the rules refuse riding on the last editor's name")
+
+    # 4c-1. Signing in with a minister's email links them, and your chosen name becomes theirs
+    a.click('[data-action="new-person"]')
+    a.fill('dialog input[name="name"]', "Emailed Person")
+    a.click('dialog [data-link-mode="invite"]')
+    a.fill('dialog input[name="email"]', "emailed@example.com")
+    a.click('dialog .dialog-actions button[value="save"]')
+    a.wait_for_selector("dialog[open] .invite-preview")
+    a.click('dialog .dialog-actions button[value="cancel"]')
+    d = browser_page(browser, phone=True)
+    d.goto(invite)
+    d.wait_for_selector("dialog[open] input[name=email]", timeout=15000)
+    d.fill("dialog input[name=email]", "emailed@example.com")
+    d.fill("dialog input[name=password]", "secret123")
+    d.click('dialog button[value="create"]')
+    d.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    set_name(d, "Chosen Name")
+    a.wait_for_selector(".person:has-text('Chosen Name')", timeout=15000)
+    check(a.locator(".person", has_text="Emailed Person").count() == 0, "your chosen name becomes your minister's name, live")
+    emailed = a.evaluate(PERSON, [cid_now, "Chosen Name"])
+    me_d = d.evaluate("async () => { const C = await import('/js/cloud.js'); return (await C.cloud()).auth.currentUser.uid; }")
+    check(emailed["userId"] == me_d, "signing in with a minister's email links the account")
+    d.wait_for_timeout(500)
+    d.reload()
+    d.wait_for_function("document.querySelector('#account-btn').dataset.state === 'synced'", timeout=20000)
+    d.wait_for_timeout(1500)
+    check(d.locator("dialog.name-prompt[open]").count() == 0, "the name prompt only comes once")
+    a.evaluate(TRY, [cid_now, "people", emailed["id"], {"email": ""}])
+    check(d.evaluate(TRY, [cid_now, "people", emailed["id"], {"userId": me_d, "email": "other@example.com"}]) == "permission-denied", "the rules refuse putting someone else's email on your minister")
+    check(d.evaluate(TRY, [cid_now, "people", emailed["id"], {"userId": me_d, "email": "emailed@example.com"}]) == "allowed", "the rules let you add your own email to your minister")
+    d.click("#account-btn")
+    d.click('dialog button[value="leave"]')
+    d.wait_for_function("document.querySelector('#account-btn').dataset.state !== 'synced'", timeout=20000)
+    d.context.close()
 
     # 4c-2. Your profile: a new name and photo reach your minister, live
     c.click("#account-btn")
@@ -275,15 +353,15 @@ with sync_playwright() as p:
     a.click('dialog [data-link-mode="member"]')
     a.wait_for_selector('dialog select[name="member"]')
     options = a.locator('dialog select[name="member"] option').all_inner_texts()
-    check(not any("Renamed" in o for o in options) and any("leader" in o for o in options), f"the list leaves out accounts already linked {options}")
+    check(not any("Renamed" in o or "Synced" in o for o in options) and any("Pastor" in o for o in options), f"the list leaves out accounts already linked {options}")
     a.click('dialog .dialog-actions button[value="save"]')
     check(a.locator("dialog[open]").count() == 1, "choosing nobody keeps the sheet open")
-    a.select_option('dialog select[name="member"]', label="leader")
+    a.select_option('dialog select[name="member"]', label="Pastor")
     a.click('dialog .dialog-actions button[value="save"]')
     a.locator(".person", has_text="Picked Person").locator(".person-link.on").wait_for(timeout=5000)
     a.locator(".person", has_text="Picked Person").click()
     a.wait_for_selector("dialog[open] .linked-row")
-    check("leader" in a.inner_text("dialog .linked-row"), "a linked minister shows who they are linked to")
+    check("Pastor" in a.inner_text("dialog .linked-row"), "a linked minister shows who they are linked to")
     a.click('dialog [data-link="unlink"]')
     check(a.locator("dialog [data-link-mode]").count() == 3, "unlinking brings the three options back")
     a.click('dialog .dialog-actions button[value="cancel"]')
@@ -292,7 +370,7 @@ with sync_playwright() as p:
     a.click("#account-btn")
     a.wait_for_selector("dialog[open] .members li:nth-child(3)", timeout=15000)
     members = a.inner_text("dialog .members").lower()
-    check("member" in members and "leader" in members, "the pastor sees the leader as a member")
+    check("member" in members and "synced person" in members, "the pastor sees the leader as a member")
     a.click('dialog .dialog-actions button[value="cancel"]')
 
     # 5b. The admin opening their own invite link stays admin
@@ -306,7 +384,7 @@ with sync_playwright() as p:
 
     # 5c. The admin removes the leader: the leader's phone drops back to its own copy,
     #     and the same invite link can't bring them back
-    a.locator("dialog .members li", has_text="leader").locator("[data-remove-member]").click()
+    a.locator("dialog .members li", has_text="Synced Person").locator("[data-remove-member]").click()
     a.wait_for_function("document.querySelectorAll('dialog .members li').length === 2", timeout=15000)
     a.click('dialog .dialog-actions button[value="cancel"]')
 
